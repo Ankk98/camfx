@@ -489,6 +489,13 @@ deactivate
 
 ---
 
+# References
+- https://github.com/google-ai-edge/mediapipe
+- https://github.com/hamidzr/webcam-mods
+- https://github.com/opencv/opencv
+
+---
+
 ## License
 
 MIT License
