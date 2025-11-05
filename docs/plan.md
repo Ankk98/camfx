@@ -2,7 +2,7 @@
 
 ## Project: camfx
 
-A lightweight, modular video enhancement library for Linux that provides background blur, background replacement, and lighting adjustment features. Output as a virtual camera for use with any video conferencing application.
+A lightweight, modular camera video enhancement middleware for Linux that provides quality of life features like background blur, background replacement, and lighting adjustment features. Output as a virtual camera for use with any video conferencing application. Integrates directly into GNOME and has deb & rpm installers for ease of use.
 
 ---
 
@@ -89,9 +89,12 @@ class PersonSegmenter:
     def get_mask(self, frame):
         results = self.segmenter.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         mask = results.segmentation_mask
-        # Post-process mask for smooth edges
-        mask = cv2.dilate(mask, np.ones((8,8), np.uint8), iterations=1)
-        mask = cv2.GaussianBlur(mask.astype(float), (21,21), 0)
+        if mask is None:
+            h, w = frame.shape[:2]
+            return np.zeros((h, w), dtype=np.float32)
+        # Ensure float32 in [0,1] and smooth edges
+        mask = np.clip(mask.astype(np.float32), 0.0, 1.0)
+        mask = cv2.GaussianBlur(mask, (21, 21), 0)
         return mask
 ```
 
@@ -102,15 +105,25 @@ import numpy as np
 
 class BackgroundBlur:
     def apply(self, frame, mask, strength=25):
-        blurred = cv2.GaussianBlur(frame, (strength, strength), 0)
-        mask_3d = np.stack((mask,) * 3, axis=-1)
-        return (frame * mask_3d + blurred * (1 - mask_3d)).astype(np.uint8)
+        if strength <= 0 or strength % 2 == 0:
+            raise ValueError("--strength must be a positive odd integer, e.g., 3,5,7,...")
+        frame_f = frame.astype(np.float32)
+        mask_f = np.clip(mask.astype(np.float32), 0.0, 1.0)
+        blurred = cv2.GaussianBlur(frame_f, (strength, strength), 0)
+        mask_3d = np.stack((mask_f,) * 3, axis=-1)
+        blended = frame_f * mask_3d + blurred * (1.0 - mask_3d)
+        return np.clip(blended, 0, 255).astype(np.uint8)
 
 class BackgroundReplace:
     def apply(self, frame, mask, background):
-        bg = cv2.resize(background, (frame.shape[1], frame.shape[0]))
-        mask_3d = np.stack((mask,) * 3, axis=-1)
-        return (frame * mask_3d + bg * (1 - mask_3d)).astype(np.uint8)
+        if background is None:
+            raise ValueError("Background image is not loaded or invalid.")
+        frame_f = frame.astype(np.float32)
+        mask_f = np.clip(mask.astype(np.float32), 0.0, 1.0)
+        bg = cv2.resize(background, (frame.shape[1], frame.shape[0])).astype(np.float32)
+        mask_3d = np.stack((mask_f,) * 3, axis=-1)
+        blended = frame_f * mask_3d + bg * (1.0 - mask_3d)
+        return np.clip(blended, 0, 255).astype(np.uint8)
 ```
 
 **`core.py` - ~80 lines**
@@ -123,6 +136,8 @@ from effects import BackgroundBlur, BackgroundReplace
 class VideoEnhancer:
     def __init__(self, input_device=0, effect_type='blur', config=None):
         self.cap = cv2.VideoCapture(input_device)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Unable to open input camera device index {input_device}. Use 'camfx list-devices' to discover working indexes.")
         self.segmenter = PersonSegmenter()
         self.effect = self._create_effect(effect_type, config)
         self.output_device = (config or {}).get('vdevice', '/dev/video10')
@@ -140,15 +155,22 @@ class VideoEnhancer:
         self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
         # Virtual camera output
-        self.virtual_cam = pyvirtualcam.Camera(
-            width=self.width, height=self.height, fps=self.target_fps, device=self.output_device
-        )
+        try:
+            self.virtual_cam = pyvirtualcam.Camera(
+                width=self.width, height=self.height, fps=self.target_fps, device=self.output_device
+            )
+        except Exception as exc:
+            self.cap.release()
+            raise RuntimeError(
+                f"Failed to open virtual camera at {self.output_device}. Ensure v4l2loopback is loaded and the device is writable. Original error: {exc}"
+            )
     
     def _create_effect(self, effect_type, config):
         if effect_type == 'blur':
             return BackgroundBlur()
         elif effect_type == 'replace':
             return BackgroundReplace()
+        raise ValueError(f"Unknown effect_type: {effect_type}")
     
     def run(self, preview=False, **kwargs):
         while True:
@@ -211,6 +233,8 @@ def blur(strength, input, vdevice, preview, width, height, fps):
 @click.option('--fps', default=30, type=int)
 def replace(image, input, vdevice, preview, width, height, fps):
     bg = cv2.imread(image)
+    if bg is None:
+        raise click.ClickException(f"Failed to read background image: {image}")
     enhancer = VideoEnhancer(
         input,
         effect_type='replace',
