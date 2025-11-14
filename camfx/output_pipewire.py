@@ -78,7 +78,7 @@ class PipeWireOutput:
 
 		# Create GStreamer pipeline
 		# pipewiresink needs media.class=Video/Source to create a virtual camera source
-		# We'll set stream-properties programmatically to handle names with spaces/special chars
+		# We'll set stream-properties programmatically using GstStructure to handle names with spaces
 		pipeline_str = (
 			f'appsrc name=source is-live=true format=time do-timestamp=true '
 			f'caps=video/x-raw,format=RGB,width={width},height={height},framerate={fps}/1 ! '
@@ -95,33 +95,56 @@ class PipeWireOutput:
 			if self.appsrc is None:
 				raise RuntimeError("Failed to get appsrc element from pipeline")
 			
-			# Set stream properties programmatically using GstStructure
-			# This properly handles names with spaces and special characters
 			sink = self.pipeline.get_by_name('sink')
 			if sink is None:
 				raise RuntimeError("Failed to get pipewiresink element from pipeline")
 			
-			# Create GstStructure for stream-properties
-			# pipewiresink expects stream-properties to be a GstStructure, not a string
-			stream_props = Gst.Structure.new_empty("props")
-			stream_props.set_value("media.class", "Video/Source")
-			stream_props.set_value("media.name", name)  # GstStructure handles spaces properly
-			stream_props.set_value("media.role", "Camera")
-			
-			# Set the stream-properties property with the GstStructure
-			# Properties should be set before starting the pipeline
-			sink.set_property("stream-properties", stream_props)
-
 			# Get message bus to capture errors before state change
 			bus = self.pipeline.get_bus()
 			bus.add_signal_watch()
 			
-			# Start pipeline
+			# Ensure pipeline is in NULL state for property setting
+			self.pipeline.set_state(Gst.State.NULL)
+			
+			# Configure appsrc properties programmatically for better control
+			self.appsrc.set_property('format', Gst.Format.TIME)
+			self.appsrc.set_property('is-live', True)
+			self.appsrc.set_property('do-timestamp', True)
+			
+			# Create GstStructure for stream-properties
+			# The structure name must be "props" and it contains the media properties
+			# media.class=Video/Source tells PipeWire/Wireplumber this is a virtual camera source
+			stream_props = Gst.Structure.new_empty("props")
+			stream_props.set_value("media.class", "Video/Source")
+			stream_props.set_value("media.name", name)  # GstStructure handles spaces properly
+			
+			# Set the stream-properties property
+			sink.set_property("stream-properties", stream_props)
+			
+			# Now start pipeline directly - GStreamer will handle state transitions
 			ret = self.pipeline.set_state(Gst.State.PLAYING)
 			if ret == Gst.StateChangeReturn.FAILURE:
 				error_msg = self._get_pipeline_error()
 				raise RuntimeError(f"Failed to start GStreamer pipeline: {error_msg}")
-			elif ret == Gst.StateChangeReturn.ASYNC:
+			
+			# For live appsrc pipelines, we may need to push an initial buffer
+			# to help the pipeline transition to PLAYING state
+			# Push a dummy black frame to get things started
+			try:
+				dummy_size = self.width * self.height * 3
+				dummy_frame = bytes(dummy_size)  # All zeros = black frame
+				dummy_buffer = Gst.Buffer.new_allocate(None, dummy_size, None)
+				if dummy_buffer:
+					dummy_buffer.fill(0, dummy_frame)
+					dummy_buffer.pts = Gst.util_get_timestamp()
+					dummy_buffer.duration = int(Gst.SECOND / self.fps)
+					# Try to push - this may help pipeline start
+					self.appsrc.emit('push-buffer', dummy_buffer)
+			except Exception:
+				# Ignore errors on dummy buffer push - pipeline should still work
+				pass
+			
+			if ret == Gst.StateChangeReturn.ASYNC:
 				# Wait for state change to complete with a timeout (5 seconds)
 				# Poll the bus for errors while waiting
 				start_time = time.time()
@@ -202,6 +225,17 @@ class PipeWireOutput:
 			) from exc
 
 		self.last_frame_time = time.time()
+		
+		# Verify pipeline is in PLAYING state and log status
+		if self.pipeline is not None:
+			state_ret = self.pipeline.get_state(0)  # Non-blocking check
+			if len(state_ret) > 1:
+				state = state_ret[1]
+				state_name = self._get_state_name(state)
+				if state != Gst.State.PLAYING:
+					print(f"Warning: Pipeline state is {state_name}, expected PLAYING", file=sys.stderr)
+				else:
+					print(f"Pipeline is in PLAYING state. Virtual camera '{name}' should be available.", file=sys.stderr)
 
 	def send(self, frame_rgb: bytes) -> None:
 		"""Send RGB frame data to PipeWire.

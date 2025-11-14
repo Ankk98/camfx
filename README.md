@@ -5,18 +5,22 @@ A lightweight, modular camera video enhancement middleware for Linux that provid
 
 Features
 --------
-- Background blur with adjustable strength (odd kernel sizes, auto-adjusted if even)
-- Basic background replacement with a static image
-- CLI with input device selection, resolution, FPS, and optional preview window
-- PipeWire virtual camera (no kernel module required)
-- Custom virtual camera naming support
-- Automatic wireplumber availability detection
+- Real-time person segmentation using MediaPipe
+- Background blur with adjustable strength
+- Background replacement with static images
+- Live preview window for testing effects
+- CLI with device selection, resolution, FPS options
+- Works on Wayland and X11
 
 Status
 ------
-- Background blur, size options and background replacement are working fine
-- Preview mode is working fine
-- Virtual Cam is not working - `Pipeline is stuck in PAUSED state and cannot transition to PLAYING.` I need to work on it.
+- ✅ Background blur and replacement: Working
+- ✅ Preview mode: Working
+- ✅ PipeWire virtual camera: Technically working (pipeline reaches PLAYING state)
+- ⚠️ Application compatibility: Limited (see Known Limitations below)
+  - PipeWire sources created but not visible to most apps
+  - Most apps need V4L2 devices, not PipeWire sources
+  - v4l2loopback still required for broad compatibility
 
 Prerequisites
 -------------
@@ -82,8 +86,48 @@ camfx blur --strength 25 --name "My Virtual Camera"
 # Note: --strength must be an odd number (3, 5, 7, ...). Even values are automatically adjusted.
 ```
 
+Known Limitations
+-----------------
+
+### Virtual Camera Compatibility
+
+**Current Status:** The virtual camera creates a PipeWire source but is **not visible to most applications**.
+
+**Why?** Most applications (Zoom, Teams, Google Meet, browsers, etc.) expect V4L2 devices (`/dev/video*`), not PipeWire sources. PipeWire virtual sources are NOT automatically exposed as V4L2 devices.
+
+**What Works:**
+- ✅ Preview window (always works)
+- ✅ PipeWire-native applications (limited: OBS Studio, some browsers with special configuration)
+
+**What Doesn't Work:**
+- ❌ Most video conferencing applications (Zoom, Teams, Discord, Slack, etc.)
+- ❌ Most browsers by default (Chrome, Firefox without special flags)
+- ❌ Standard camera applications expecting `/dev/video*` devices
+
+**Workaround for Broad Compatibility:**
+
+To make the virtual camera visible to all applications, v4l2loopback kernel module is still required:
+
+```bash
+# Install v4l2loopback
+sudo dnf install v4l2loopback akmod-v4l2loopback  # Fedora
+# OR
+sudo apt install v4l2loopback-dkms              # Ubuntu/Debian
+
+# Load the module
+sudo modprobe v4l2loopback video_nr=10 card_label="camfx Virtual Camera"
+
+# Verify it's loaded
+v4l2-ctl --list-devices
+```
+
+**Note:** This project was created to explore PipeWire as a v4l2loopback alternative. While PipeWire works technically, application compatibility requires V4L2 devices. A future version may add v4l2loopback support for broader compatibility.
+
 Troubleshooting
 ---------------
+
+### PipeWire Virtual Camera
+
 - **PipeWire not detected**: Ensure PipeWire is installed and running:
   ```bash
   systemctl --user status pipewire
@@ -107,28 +151,40 @@ Troubleshooting
   sudo apt install gstreamer1.0-plugins-base gstreamer1.0-plugins-good
   ```
 
-- **Virtual camera not appearing in apps**: Check if PipeWire source is created:
-  ```bash
-  pw-cli list-sources | grep camfx
-  ```
-  If the source doesn't appear, check that wireplumber is running (see above).
+- **Virtual camera not appearing in apps**: This is expected. See "Known Limitations" above. The PipeWire source is created but not visible to most applications. Use `--preview` mode to test effects, or install v4l2loopback for application compatibility.
 
 - **Pipeline stuck in PAUSED state**: This usually means wireplumber is not running. Start it with:
   ```bash
   systemctl --user start wireplumber
   ```
 
+### General
+
 - **Preview window does not appear**: Try `--no-virtual` to isolate the preview, and verify input index with `camfx list-devices`.
 
 - **Strength value errors**: The `--strength` parameter must be a positive odd integer (3, 5, 7, ...). Even values are automatically adjusted to the next odd number with a warning.
+
+- **Physical camera shows black in other apps**: Expected when camfx is running. OpenCV locks the camera. Other apps should use the virtual camera (requires v4l2loopback for compatibility).
 
 Examples
 --------
 See the `examples/` directory for programmatic usage examples.
 
-Notes
------
-- This project in entirely vibe coded.
+Development Notes
+-----------------
+- This project was created to explore PipeWire as a v4l2loopback alternative
+- PipeWire virtual sources work technically but lack broad application compatibility
+- Preview mode works well for testing and demonstrating effects
+- Future versions may add v4l2loopback backend for application compatibility
+- This project is entirely vibe coded
+
+Contributing
+------------
+Contributions welcome! Areas for improvement:
+- Add v4l2loopback backend for broad application compatibility
+- Improve virtual camera detection and registration
+- Add more effects (color grading, filters, etc.)
+- Performance optimizations
 
 License
 -------
