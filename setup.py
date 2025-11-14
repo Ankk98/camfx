@@ -16,6 +16,7 @@ setup(
 			'camfx=camfx.cli:cli',
 		],
 	},
+	license='MIT',
 )
 
 
