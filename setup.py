@@ -7,7 +7,7 @@ setup(
 	install_requires=[
 		'mediapipe>=0.10.0',
 		'opencv-python>=4.8.0',
-		'pyvirtualcam>=0.11.0',
+		'PyGObject>=3.42.0',
 		'click>=8.1.0',
 		'numpy>=1.24.0',
 	],
