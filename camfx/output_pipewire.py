@@ -34,11 +34,12 @@ class PipeWireOutput:
 		self.appsrc: Optional[Gst.Element] = None
 
 		# Create GStreamer pipeline
+		# pipewiresink needs media.class=Video/Source to create a virtual camera source
 		pipeline_str = (
 			f'appsrc name=source is-live=true format=time do-timestamp=true '
 			f'caps=video/x-raw,format=RGB,width={width},height={height},framerate={fps}/1 ! '
 			f'videoconvert ! '
-			f'pipewiresink name=sink stream-properties="props,media.name={name}"'
+			f'pipewiresink name=sink stream-properties="props,media.class=Video/Source,media.name={name},media.role=Camera"'
 		)
 
 		try:
@@ -50,15 +51,55 @@ class PipeWireOutput:
 			if self.appsrc is None:
 				raise RuntimeError("Failed to get appsrc element from pipeline")
 
+			# Get message bus to capture errors
+			bus = self.pipeline.get_bus()
+			bus.add_signal_watch()
+			
 			# Start pipeline
 			ret = self.pipeline.set_state(Gst.State.PLAYING)
 			if ret == Gst.StateChangeReturn.FAILURE:
-				raise RuntimeError("Failed to start GStreamer pipeline")
+				error_msg = self._get_pipeline_error()
+				raise RuntimeError(f"Failed to start GStreamer pipeline: {error_msg}")
 			elif ret == Gst.StateChangeReturn.ASYNC:
-				# Wait for state change to complete
-				ret = self.pipeline.get_state(Gst.CLOCK_TIME_NONE)
-				if ret[0] == Gst.StateChangeReturn.FAILURE:
-					raise RuntimeError("Failed to start GStreamer pipeline")
+				# Wait for state change to complete with a timeout (5 seconds)
+				# Poll the bus for errors while waiting
+				start_time = time.time()
+				timeout_seconds = 5.0
+				check_interval = 0.1  # Check every 100ms
+				
+				while True:
+					# Check for errors on the bus (non-blocking)
+					error_msg = self._check_bus_for_errors()
+					if error_msg:
+						raise RuntimeError(f"Failed to start GStreamer pipeline: {error_msg}")
+					
+					# Check state with a short timeout
+					ret = self.pipeline.get_state(int(check_interval * Gst.SECOND))
+					state = ret[0]
+					
+					if state == Gst.StateChangeReturn.FAILURE:
+						error_msg = self._get_pipeline_error()
+						raise RuntimeError(f"Failed to start GStreamer pipeline: {error_msg}")
+					elif state == Gst.StateChangeReturn.SUCCESS:
+						# State change completed successfully
+						break
+					
+					# Check timeout
+					elapsed = time.time() - start_time
+					if elapsed > timeout_seconds:
+						# Try one more time to get error message
+						error_msg = self._check_bus_for_errors()
+						if not error_msg:
+							error_msg = "No error message available"
+						raise RuntimeError(
+							f"Timeout ({timeout_seconds}s) waiting for pipeline to start. "
+							f"This may indicate PipeWire session manager (wireplumber) is not running. "
+							f"Try: systemctl --user start wireplumber\n"
+							f"Error: {error_msg}"
+						)
+					
+					# Small sleep to avoid busy-waiting
+					time.sleep(check_interval)
 
 		except Exception as exc:
 			self.cleanup()
@@ -116,9 +157,55 @@ class PipeWireOutput:
 			time.sleep(sleep_time)
 		self.last_frame_time = time.time()
 
+	def _get_pipeline_error(self) -> str:
+		"""Extract error message from GStreamer pipeline bus (blocking)."""
+		if self.pipeline is None:
+			return "Pipeline is None"
+		
+		bus = self.pipeline.get_bus()
+		if bus is None:
+			return "Failed to get message bus"
+		
+		# Poll for error messages (non-blocking check first)
+		msg = bus.pop_filtered(Gst.MessageType.ERROR | Gst.MessageType.EOS)
+		if msg and msg.type == Gst.MessageType.ERROR:
+			err, debug = msg.parse_error()
+			return f"{err.message} (Debug: {debug})"
+		
+		# If no immediate message, try waiting briefly
+		msg = bus.timed_pop_filtered(
+			Gst.SECOND,  # Wait up to 1 second
+			Gst.MessageType.ERROR | Gst.MessageType.EOS
+		)
+		if msg and msg.type == Gst.MessageType.ERROR:
+			err, debug = msg.parse_error()
+			return f"{err.message} (Debug: {debug})"
+		
+		return "Unknown error (no error message from GStreamer)"
+
+	def _check_bus_for_errors(self) -> str:
+		"""Non-blocking check for error messages on the bus."""
+		if self.pipeline is None:
+			return ""
+		
+		bus = self.pipeline.get_bus()
+		if bus is None:
+			return ""
+		
+		msg = bus.pop_filtered(Gst.MessageType.ERROR)
+		if msg and msg.type == Gst.MessageType.ERROR:
+			err, debug = msg.parse_error()
+			return f"{err.message} (Debug: {debug})"
+		
+		return ""
+
 	def cleanup(self) -> None:
 		"""Stop and cleanup GStreamer pipeline."""
 		if self.pipeline is not None:
+			# Remove bus watch before stopping
+			bus = self.pipeline.get_bus()
+			if bus:
+				bus.remove_signal_watch()
 			self.pipeline.set_state(Gst.State.NULL)
 			self.pipeline = None
 			self.appsrc = None

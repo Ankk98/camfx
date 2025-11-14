@@ -7,13 +7,18 @@ from .output_pipewire import PipeWireOutput
 
 class VideoEnhancer:
 	def __init__(self, input_device: int = 0, effect_type: str = 'blur', config: dict | None = None) -> None:
+		print(f"Opening camera device {input_device}...")
 		self.cap = cv2.VideoCapture(input_device)
 		if not self.cap.isOpened():
 			raise RuntimeError(
 				f"Unable to open input camera device index {input_device}. Use 'camfx list-devices' to discover working indexes."
 			)
+		print("Camera opened successfully")
+		print("Initializing segmentation model...")
 		self.segmenter = PersonSegmenter()
+		print("Segmentation model ready")
 		self.effect = self._create_effect(effect_type)
+		print(f"Effect '{effect_type}' created")
 		self.target_fps = int((config or {}).get('fps', 30))
 		self.enable_virtual = bool((config or {}).get('enable_virtual', True))
 		camera_name = (config or {}).get('camera_name', 'camfx')
@@ -34,18 +39,21 @@ class VideoEnhancer:
 		self.virtual_cam = None
 		if self.enable_virtual:
 			try:
+				print(f"Initializing PipeWire virtual camera ({self.width}x{self.height} @ {self.target_fps}fps)...")
 				self.virtual_cam = PipeWireOutput(
 					width=self.width,
 					height=self.height,
 					fps=self.target_fps,
 					name=camera_name,
 				)
+				print("PipeWire virtual camera ready")
 			except Exception as exc:
-				self.cap.release()
-				raise RuntimeError(
-					f"Failed to initialize PipeWire virtual camera. Ensure PipeWire and GStreamer are installed. "
-					f"Original error: {exc}"
-				) from exc
+				print(f"Warning: Failed to initialize PipeWire virtual camera: {exc}")
+				print("Continuing with preview only. To enable virtual camera:")
+				print("  1. Ensure PipeWire is running: systemctl --user status pipewire")
+				print("  2. Ensure wireplumber is running: systemctl --user start wireplumber")
+				print("  3. Or use --no-virtual to skip virtual camera initialization")
+				self.virtual_cam = None
 
 	def _create_effect(self, effect_type: str):
 		if effect_type == 'blur':
@@ -56,9 +64,16 @@ class VideoEnhancer:
 
 	def run(self, preview: bool = False, **kwargs) -> None:
 		try:
+			if preview:
+				# Create window early to ensure it's ready
+				cv2.namedWindow('camfx preview', cv2.WINDOW_NORMAL)
+				print("Preview window created. Press 'q' to quit.")
+			
+			frame_count = 0
 			while True:
 				ret, frame = self.cap.read()
 				if not ret:
+					print("Failed to read frame from camera")
 					break
 
 				mask = self.segmenter.get_mask(frame)
@@ -69,10 +84,18 @@ class VideoEnhancer:
 					frame_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
 					self.virtual_cam.send(frame_rgb.tobytes())
 					self.virtual_cam.sleep_until_next_frame()
+				
 				if preview:
 					cv2.imshow('camfx preview', processed)
-					if cv2.waitKey(1) & 0xFF == ord('q'):
+					# Use waitKey with a timeout to prevent hanging
+					key = cv2.waitKey(1) & 0xFF
+					if key == ord('q'):
+						print("Quit requested")
 						break
+				
+				frame_count += 1
+				if frame_count == 1:
+					print(f"Processing frames... (Press 'q' in preview window to quit)")
 		finally:
 			self.cap.release()
 			if self.virtual_cam is not None:
