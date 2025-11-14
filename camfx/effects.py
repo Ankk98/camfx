@@ -4,8 +4,10 @@ import numpy as np
 
 class BackgroundBlur:
 	def apply(self, frame: np.ndarray, mask: np.ndarray, strength: int = 25) -> np.ndarray:
-		if strength <= 0 or strength % 2 == 0:
-			raise ValueError("--strength must be a positive odd integer, e.g., 3,5,7,...")
+		if strength <= 0:
+			raise ValueError(f"Strength must be positive, got {strength}")
+		if strength % 2 == 0:
+			raise ValueError(f"Strength must be odd (Gaussian blur requires odd kernel size), got {strength}. Use an odd number like {strength + 1} or {strength - 1}")
 		frame_f = frame.astype(np.float32)
 		mask_f = np.clip(mask.astype(np.float32), 0.0, 1.0)
 		blurred = cv2.GaussianBlur(frame_f, (strength, strength), 0)

@@ -47,4 +47,6 @@ Thumbs.db
 .env
 .env.*
 
+# Temp files
+tmp/
 

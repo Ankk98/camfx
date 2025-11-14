@@ -87,10 +87,16 @@ class PipeWireOutput:
 					# Check timeout
 					elapsed = time.time() - start_time
 					if elapsed > timeout_seconds:
-						# Try one more time to get error message
+						# Try multiple methods to get error message
 						error_msg = self._check_bus_for_errors()
 						if not error_msg:
-							error_msg = "No error message available"
+							# Try blocking method as last resort
+							error_msg = self._get_pipeline_error()
+						if not error_msg or error_msg == "Unknown error (no error message from GStreamer)":
+							# Check final state for additional context
+							final_state_ret = self.pipeline.get_state(0)  # Non-blocking
+							state_info = f" (Current state: {final_state_ret[1] if len(final_state_ret) > 1 else 'unknown'})"
+							error_msg = f"No error message available{state_info}"
 						raise RuntimeError(
 							f"Timeout ({timeout_seconds}s) waiting for pipeline to start. "
 							f"This may indicate PipeWire session manager (wireplumber) is not running. "
@@ -192,10 +198,17 @@ class PipeWireOutput:
 		if bus is None:
 			return ""
 		
+		# Check for ERROR messages
 		msg = bus.pop_filtered(Gst.MessageType.ERROR)
 		if msg and msg.type == Gst.MessageType.ERROR:
 			err, debug = msg.parse_error()
 			return f"{err.message} (Debug: {debug})"
+		
+		# Also check for WARNING messages which might provide context
+		msg = bus.pop_filtered(Gst.MessageType.WARNING)
+		if msg and msg.type == Gst.MessageType.WARNING:
+			warn, debug = msg.parse_warning()
+			return f"Warning: {warn.message} (Debug: {debug})"
 		
 		return ""
 

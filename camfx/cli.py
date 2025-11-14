@@ -10,7 +10,7 @@ def cli():
 
 
 @cli.command()
-@click.option('--strength', default=25, type=int, help='Odd kernel size for Gaussian blur (e.g., 3,5,7,...)')
+@click.option('--strength', default=25, type=int, help='Kernel size for Gaussian blur (must be odd, e.g., 3,5,7,...). Even values will be adjusted to next odd number.')
 @click.option('--input', 'input_index', default=0, type=int, help='Camera index (e.g., 0)')
 @click.option('--preview', is_flag=True, default=False, help='Show a preview window')
 @click.option('--no-virtual', is_flag=True, default=False, help='Disable virtual camera output (preview only)')
@@ -20,6 +20,15 @@ def cli():
 @click.option('--name', default='camfx', type=str, help='Name for the virtual camera source')
 def blur(strength: int, input_index: int, preview: bool, no_virtual: bool, width: int | None, height: int | None, fps: int, name: str):
 	"""Apply background blur effect to camera feed."""
+	# Validate and adjust strength value
+	if strength <= 0:
+		raise click.ClickException(f"Invalid strength value: {strength}. Strength must be a positive integer (e.g., 3, 5, 7, ...)")
+	
+	original_strength = strength
+	if strength % 2 == 0:
+		strength = strength + 1  # Round up to next odd number
+		click.echo(f"Warning: Strength must be odd. Adjusted {original_strength} to {strength}.", err=True)
+	
 	# Defer heavy imports to avoid slowing other commands
 	from .core import VideoEnhancer
 	import cv2  # noqa: F401
@@ -32,6 +41,9 @@ def blur(strength: int, input_index: int, preview: bool, no_virtual: bool, width
 		enhancer.run(preview=preview, strength=strength)
 	except KeyboardInterrupt:
 		print("Stopped")
+	except ValueError as e:
+		# Re-raise as ClickException for better CLI error formatting
+		raise click.ClickException(str(e))
 
 
 @cli.command()
