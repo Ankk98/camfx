@@ -1,5 +1,8 @@
 """PipeWire virtual camera output using GStreamer via PyGObject."""
 
+import os
+import subprocess
+import sys
 import time
 from typing import Optional
 
@@ -11,6 +14,40 @@ from gi.repository import Gst
 
 class PipeWireOutput:
 	"""PipeWire virtual camera output using GStreamer's pipewiresink element."""
+
+	@staticmethod
+	def _check_wireplumber_available() -> tuple[bool, str]:
+		"""Check if wireplumber service is available and running.
+		
+		Returns:
+			Tuple of (is_available, status_message)
+		"""
+		try:
+			# Check if wireplumber service exists and is active
+			result = subprocess.run(
+				['systemctl', '--user', 'is-active', 'wireplumber'],
+				capture_output=True,
+				text=True,
+				timeout=2
+			)
+			if result.returncode == 0:
+				return True, "wireplumber is running"
+			else:
+				return False, "wireplumber service is not active"
+		except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
+			# Fallback: check if wireplumber process is running
+			try:
+				result = subprocess.run(
+					['pgrep', '-u', str(os.getuid()), 'wireplumber'],
+					capture_output=True,
+					timeout=2
+				)
+				if result.returncode == 0:
+					return True, "wireplumber process is running"
+				else:
+					return False, "wireplumber process not found"
+			except Exception:
+				return False, "could not check wireplumber status"
 
 	def __init__(self, width: int, height: int, fps: int, name: str = "camfx") -> None:
 		"""Initialize PipeWire output.
@@ -24,6 +61,12 @@ class PipeWireOutput:
 		Raises:
 			RuntimeError: If GStreamer pipeline fails to start
 		"""
+		# Check wireplumber availability before attempting to create pipeline
+		wireplumber_available, wireplumber_status = self._check_wireplumber_available()
+		if not wireplumber_available:
+			print(f"Warning: {wireplumber_status}. Virtual camera may not work.", file=sys.stderr)
+			print("To start wireplumber: systemctl --user start wireplumber", file=sys.stderr)
+		
 		Gst.init(None)
 		self.width = width
 		self.height = height
@@ -35,11 +78,12 @@ class PipeWireOutput:
 
 		# Create GStreamer pipeline
 		# pipewiresink needs media.class=Video/Source to create a virtual camera source
+		# We'll set stream-properties programmatically to handle names with spaces/special chars
 		pipeline_str = (
 			f'appsrc name=source is-live=true format=time do-timestamp=true '
 			f'caps=video/x-raw,format=RGB,width={width},height={height},framerate={fps}/1 ! '
 			f'videoconvert ! '
-			f'pipewiresink name=sink stream-properties="props,media.class=Video/Source,media.name={name},media.role=Camera"'
+			f'pipewiresink name=sink'
 		)
 
 		try:
@@ -50,8 +94,25 @@ class PipeWireOutput:
 			self.appsrc = self.pipeline.get_by_name('source')
 			if self.appsrc is None:
 				raise RuntimeError("Failed to get appsrc element from pipeline")
+			
+			# Set stream properties programmatically using GstStructure
+			# This properly handles names with spaces and special characters
+			sink = self.pipeline.get_by_name('sink')
+			if sink is None:
+				raise RuntimeError("Failed to get pipewiresink element from pipeline")
+			
+			# Create GstStructure for stream-properties
+			# pipewiresink expects stream-properties to be a GstStructure, not a string
+			stream_props = Gst.Structure.new_empty("props")
+			stream_props.set_value("media.class", "Video/Source")
+			stream_props.set_value("media.name", name)  # GstStructure handles spaces properly
+			stream_props.set_value("media.role", "Camera")
+			
+			# Set the stream-properties property with the GstStructure
+			# Properties should be set before starting the pipeline
+			sink.set_property("stream-properties", stream_props)
 
-			# Get message bus to capture errors
+			# Get message bus to capture errors before state change
 			bus = self.pipeline.get_bus()
 			bus.add_signal_watch()
 			
@@ -92,15 +153,41 @@ class PipeWireOutput:
 						if not error_msg:
 							# Try blocking method as last resort
 							error_msg = self._get_pipeline_error()
+						
+						# Get final state for additional context
+						final_state_ret = self.pipeline.get_state(0)  # Non-blocking
+						state = final_state_ret[1] if len(final_state_ret) > 1 else None
+						state_name = self._get_state_name(state) if state is not None else "unknown"
+						
 						if not error_msg or error_msg == "Unknown error (no error message from GStreamer)":
-							# Check final state for additional context
-							final_state_ret = self.pipeline.get_state(0)  # Non-blocking
-							state_info = f" (Current state: {final_state_ret[1] if len(final_state_ret) > 1 else 'unknown'})"
-							error_msg = f"No error message available{state_info}"
+							error_msg = f"No error message available (Pipeline stuck in state: {state_name})"
+						
+						# Provide more specific guidance based on state
+						if state == Gst.State.PLAYING:
+							guidance = (
+								"Pipeline is stuck transitioning to PLAYING state. "
+								"This usually means pipewiresink cannot connect to PipeWire. "
+								"Ensure wireplumber (PipeWire session manager) is running:\n"
+								"  systemctl --user start wireplumber\n"
+								"  systemctl --user status wireplumber"
+							)
+						elif state == Gst.State.PAUSED:
+							guidance = (
+								"Pipeline is stuck in PAUSED state and cannot transition to PLAYING. "
+								"This usually means pipewiresink cannot connect to PipeWire. "
+								"Ensure wireplumber (PipeWire session manager) is running:\n"
+								"  systemctl --user start wireplumber\n"
+								"  systemctl --user status wireplumber"
+							)
+						else:
+							guidance = (
+								"This may indicate PipeWire session manager (wireplumber) is not running. "
+								"Try: systemctl --user start wireplumber"
+							)
+						
 						raise RuntimeError(
-							f"Timeout ({timeout_seconds}s) waiting for pipeline to start. "
-							f"This may indicate PipeWire session manager (wireplumber) is not running. "
-							f"Try: systemctl --user start wireplumber\n"
+							f"Timeout ({timeout_seconds}s) waiting for pipeline to start.\n"
+							f"{guidance}\n"
 							f"Error: {error_msg}"
 						)
 					
@@ -172,23 +259,67 @@ class PipeWireOutput:
 		if bus is None:
 			return "Failed to get message bus"
 		
-		# Poll for error messages (non-blocking check first)
-		msg = bus.pop_filtered(Gst.MessageType.ERROR | Gst.MessageType.EOS)
-		if msg and msg.type == Gst.MessageType.ERROR:
-			err, debug = msg.parse_error()
-			return f"{err.message} (Debug: {debug})"
+		# Collect all error and warning messages
+		error_messages = []
+		warning_messages = []
 		
-		# If no immediate message, try waiting briefly
+		# Poll for messages (non-blocking check first)
+		while True:
+			msg = bus.pop_filtered(Gst.MessageType.ERROR | Gst.MessageType.WARNING | Gst.MessageType.EOS)
+			if not msg:
+				break
+			
+			if msg.type == Gst.MessageType.ERROR:
+				err, debug = msg.parse_error()
+				error_msg = f"{err.message}"
+				if debug:
+					error_msg += f" (Debug: {debug})"
+				error_messages.append(error_msg)
+			elif msg.type == Gst.MessageType.WARNING:
+				warn, debug = msg.parse_warning()
+				warn_msg = f"{warn.message}"
+				if debug:
+					warn_msg += f" (Debug: {debug})"
+				warning_messages.append(warn_msg)
+		
+		# If no immediate messages, try waiting briefly for more
 		msg = bus.timed_pop_filtered(
 			Gst.SECOND,  # Wait up to 1 second
-			Gst.MessageType.ERROR | Gst.MessageType.EOS
+			Gst.MessageType.ERROR | Gst.MessageType.WARNING | Gst.MessageType.EOS
 		)
-		if msg and msg.type == Gst.MessageType.ERROR:
-			err, debug = msg.parse_error()
-			return f"{err.message} (Debug: {debug})"
+		if msg:
+			if msg.type == Gst.MessageType.ERROR:
+				err, debug = msg.parse_error()
+				error_msg = f"{err.message}"
+				if debug:
+					error_msg += f" (Debug: {debug})"
+				error_messages.append(error_msg)
+			elif msg.type == Gst.MessageType.WARNING:
+				warn, debug = msg.parse_warning()
+				warn_msg = f"{warn.message}"
+				if debug:
+					warn_msg += f" (Debug: {debug})"
+				warning_messages.append(warn_msg)
 		
-		return "Unknown error (no error message from GStreamer)"
+		# Return the most relevant error, or warnings if no errors
+		if error_messages:
+			return "; ".join(error_messages)
+		elif warning_messages:
+			return f"Warnings (no errors): {'; '.join(warning_messages)}"
+		else:
+			return "Unknown error (no error message from GStreamer)"
 
+	def _get_state_name(self, state: int) -> str:
+		"""Convert GStreamer state enum to human-readable name."""
+		state_names = {
+			Gst.State.VOID_PENDING: "VOID_PENDING",
+			Gst.State.NULL: "NULL",
+			Gst.State.READY: "READY",
+			Gst.State.PAUSED: "PAUSED",
+			Gst.State.PLAYING: "PLAYING",
+		}
+		return state_names.get(state, f"UNKNOWN({state})")
+	
 	def _check_bus_for_errors(self) -> str:
 		"""Non-blocking check for error messages on the bus."""
 		if self.pipeline is None:
