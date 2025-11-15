@@ -1,29 +1,31 @@
-camfx
-=====
+# camfx
 
-A lightweight, modular camera video enhancement middleware for Linux that provides background blur and basic background replacement, outputting to a virtual camera via PipeWire for use with video apps.
+A lightweight, modular camera video enhancement middleware for Linux that provides real-time effects with live switching and effect chaining, outputting to a virtual camera via PipeWire.
 
-Features
---------
-- Real-time person segmentation using MediaPipe
-- Background blur with adjustable strength
-- Background replacement with static images
-- Live preview window for testing effects
-- CLI with device selection, resolution, FPS options
-- Works on Wayland and X11
+## Features
 
-Status
-------
-- ✅ Background blur and replacement: Working
+- **Real-time effects**: Background blur, background replacement, brightness adjustment, face beautification, auto-framing, and eye gaze correction
+- **Effect chaining**: Apply multiple effects in sequence (e.g., blur + brightness + beautify)
+- **Live effect switching**: Change effects at runtime without restarting (via D-Bus)
+- **On-demand camera**: Camera only activates when virtual source is being consumed (lazy camera mode)
+- **Live preview**: Preview the output from a running camfx instance
+- **Person segmentation**: Real-time person segmentation using MediaPipe
+- **CLI with device selection**: Resolution, FPS, and camera selection options
+- **Works on Wayland and X11**
+
+## Status
+
+- ✅ All effects: Working
+- ✅ Effect chaining: Working
+- ✅ Live effect switching: Working (D-Bus)
 - ✅ Preview mode: Working
-- ✅ PipeWire virtual camera: Technically working (pipeline reaches PLAYING state)
+- ✅ PipeWire virtual camera: Working
+- ✅ Lazy camera mode: Working
 - ⚠️ Application compatibility: Limited (see Known Limitations below)
-  - PipeWire sources created but not visible to most apps
-  - Most apps need V4L2 devices, not PipeWire sources
-  - v4l2loopback still required for broad compatibility
+- Preview functionality: Not working, preview hangs with black output
 
-Prerequisites
--------------
+## Prerequisites
+
 - Linux with PipeWire (default on Fedora, GNOME, and modern distributions)
 - Python 3.10+ (uses modern type hints)
 - GStreamer and GStreamer plugins (usually pre-installed with PipeWire)
@@ -39,10 +41,10 @@ sudo dnf install python3-gobject gstreamer1 gstreamer1-plugins-base gstreamer1-p
 sudo apt install python3-gi python3-gi-cairo gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good pipewire
 ```
 
-Installation
-------------
+## Installation
+
 ```bash
-# 1) Clone the repository (if not already done)
+# 1) Clone the repository
 git clone <repository-url>
 cd camfx
 
@@ -55,39 +57,147 @@ pip install -U pip wheel
 pip install -e .
 ```
 
-Quickstart
-----------
-```bash
-# Run with background blur
-camfx blur --strength 25 --preview
+## Quickstart
 
-# Or run with background replacement
-camfx replace --image /path/to/background.jpg --preview
+```bash
+# Start virtual camera with blur effect
+camfx start --effect blur --strength 25 --dbus
+
+# In another terminal, preview the output
+camfx preview
+
+# Change effect at runtime (requires --dbus flag)
+camfx set-effect --effect brightness --brightness 10
+
+# Add another effect to the chain
+camfx add-effect --effect beautify --smoothness 5
+
+# Check current effects
+camfx get-effects
 ```
 
-CLI Reference
--------------
+## CLI Reference
+
+### Start Virtual Camera
+
 ```bash
-# Background blur
-camfx blur --strength 25 --input 0 --width 1280 --height 720 --fps 30 --preview
+# Start with initial effect
+camfx start --effect blur --strength 25
 
-# Background replacement
-camfx replace --image /path/to/background.jpg --input 0 --width 1280 --height 720 --fps 30 --preview
+# Start with D-Bus enabled for runtime control
+camfx start --effect blur --strength 25 --dbus
 
+# Start with lazy camera (only activates when source is in use)
+camfx start --effect blur --strength 25 --lazy-camera --dbus
+
+# Start without initial effect (can add effects via D-Bus)
+camfx start --dbus
+
+# Custom resolution and FPS
+camfx start --effect blur --width 1280 --height 720 --fps 30
+
+# Custom virtual camera name
+camfx start --effect blur --name "My Virtual Camera"
+```
+
+### Preview
+
+```bash
+# Preview output from running camfx instance
+camfx preview
+
+# Preview specific virtual camera
+camfx preview --name "My Virtual Camera"
+
+# Fallback: Preview camera directly with effect (if camfx not running)
+camfx preview --effect blur --strength 25
+```
+
+### Runtime Effect Control (D-Bus)
+
+These commands require `camfx start --dbus` to be running:
+
+```bash
+# Replace all effects with a new one
+camfx set-effect --effect brightness --brightness 10
+
+# Add effect to chain
+camfx add-effect --effect beautify --smoothness 5
+
+# Get current effect chain
+camfx get-effects
+```
+
+### Utility Commands
+
+```bash
 # List available camera devices
 camfx list-devices
-
-# Preview-only (no virtual camera) for debugging
-camfx blur --input 0 --strength 25 --preview --no-virtual
-
-# Custom virtual camera name (spaces and special characters supported)
-camfx blur --strength 25 --name "My Virtual Camera"
-
-# Note: --strength must be an odd number (3, 5, 7, ...). Even values are automatically adjusted.
 ```
 
-Known Limitations
------------------
+## Available Effects
+
+- **blur**: Background blur with adjustable strength
+  - `--strength`: Blur strength (must be odd: 3, 5, 7, ...)
+  
+- **replace**: Replace background with static image
+  - Requires background image (not yet supported via CLI, use D-Bus)
+  
+- **brightness**: Adjust brightness and contrast
+  - `--brightness`: Brightness adjustment (-100 to 100)
+  - `--contrast`: Contrast multiplier (0.5 to 2.0)
+  - `--face-only`: Apply only to face region (requires segmentation)
+  
+- **beautify**: Face beautification and skin smoothing
+  - `--smoothness`: Smoothing strength (1-15)
+  
+- **autoframe**: Auto-frame and center on face
+  - `--padding`: Padding around face (0.0-1.0)
+  - `--min-zoom`: Minimum zoom level
+  - `--max-zoom`: Maximum zoom level
+  
+- **gaze-correct**: Correct eye gaze to appear looking at camera
+  - `--strength`: Correction strength (0.0-1.0)
+
+## Effect Chaining
+
+You can chain multiple effects together:
+
+```bash
+# Start with blur
+camfx start --effect blur --strength 25 --dbus
+
+# Add brightness adjustment
+camfx add-effect --effect brightness --brightness 10
+
+# Add beautification
+camfx add-effect --effect beautify --smoothness 5
+
+# Check the chain
+camfx get-effects
+# Output:
+# Current effect chain (3 effects):
+#   0: blur (BackgroundBlur) - strength=25
+#   1: brightness (BrightnessAdjustment) - brightness=10
+#   2: beautify (FaceBeautification) - smoothness=5
+```
+
+Effects are applied in the order they were added to the chain.
+
+## Lazy Camera Mode
+
+With `--lazy-camera`, the camera only activates when the virtual source is being consumed:
+
+```bash
+camfx start --effect blur --lazy-camera --dbus
+```
+
+- Camera stays off when no application is using the virtual camera
+- Automatically starts when an application connects
+- Automatically stops when all applications disconnect
+- Saves resources and privacy
+
+## Known Limitations
 
 ### Virtual Camera Compatibility
 
@@ -121,10 +231,7 @@ sudo modprobe v4l2loopback video_nr=10 card_label="camfx Virtual Camera"
 v4l2-ctl --list-devices
 ```
 
-**Note:** This project was created to explore PipeWire as a v4l2loopback alternative. While PipeWire works technically, application compatibility requires V4L2 devices. A future version may add v4l2loopback support for broader compatibility.
-
-Troubleshooting
----------------
+## Troubleshooting
 
 ### PipeWire Virtual Camera
 
@@ -132,64 +239,109 @@ Troubleshooting
   ```bash
   systemctl --user status pipewire
   ```
-  On Fedora/GNOME, PipeWire is usually pre-installed.
 
-- **Wireplumber not running**: The virtual camera requires wireplumber (PipeWire session manager) to be running:
+- **Wireplumber not running**: The virtual camera requires wireplumber:
   ```bash
   systemctl --user start wireplumber
-  systemctl --user enable wireplumber  # Enable on login
+  systemctl --user enable wireplumber
   systemctl --user status wireplumber
   ```
-  If wireplumber is not running, you'll see a timeout error and the pipeline will be stuck in PAUSED state.
 
-- **GStreamer errors**: Ensure GStreamer and plugins are installed:
+- **Virtual camera not appearing in apps**: This is expected. See "Known Limitations" above.
+
+### D-Bus Control
+
+- **D-Bus commands fail**: Make sure `camfx start --dbus` is running
+- **D-Bus not available**: Install `dbus-python`:
   ```bash
-  # Fedora
-  sudo dnf install gstreamer1 gstreamer1-plugins-base gstreamer1-plugins-good
-  
-  # Ubuntu/Debian
-  sudo apt install gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+  pip install dbus-python
   ```
 
-- **Virtual camera not appearing in apps**: This is expected. See "Known Limitations" above. The PipeWire source is created but not visible to most applications. Use `--preview` mode to test effects, or install v4l2loopback for application compatibility.
+### Camera Issues
 
-- **Chromium/Chrome cannot see the camera**: Check docs/chromium-compatibility-findings.md 
-
-- **Pipeline stuck in PAUSED state**: This usually means wireplumber is not running. Start it with:
-  ```bash
-  systemctl --user start wireplumber
-  ```
+- **Camera in use error**: Another process is using the camera. Close other camera applications or use a different camera index.
+- **Preview shows black**: Make sure `camfx start` is running if previewing virtual camera output.
 
 ### General
 
-- **Preview window does not appear**: Try `--no-virtual` to isolate the preview, and verify input index with `camfx list-devices`.
+- **Preview window does not appear**: Try previewing camera directly: `camfx preview --effect blur`
+- **Strength value errors**: The `--strength` parameter must be a positive odd integer (3, 5, 7, ...)
 
-- **Strength value errors**: The `--strength` parameter must be a positive odd integer (3, 5, 7, ...). Even values are automatically adjusted to the next odd number with a warning.
+## Examples
 
-- **Physical camera shows black in other apps**: Expected when camfx is running. OpenCV locks the camera. Other apps should use the virtual camera (requires v4l2loopback for compatibility).
+### Basic Usage
 
-Examples
---------
-See the `examples/` directory for programmatic usage examples.
+```bash
+# Terminal 1: Start virtual camera
+camfx start --effect blur --strength 25 --dbus
 
-Development Notes
------------------
-- This project was created to explore PipeWire as a v4l2loopback alternative
-- PipeWire virtual sources work technically but lack broad application compatibility
-- Preview mode works well for testing and demonstrating effects
-- Future versions may add v4l2loopback backend for application compatibility
-- This project is entirely vibe coded
+# Terminal 2: Preview output
+camfx preview
 
-Contributing
-------------
+# Terminal 3: Change effect
+camfx set-effect --effect brightness --brightness 10
+```
+
+### Effect Chaining
+
+```bash
+# Start with blur
+camfx start --effect blur --strength 25 --dbus
+
+# Add brightness
+camfx add-effect --effect brightness --brightness 10
+
+# Add beautify
+camfx add-effect --effect beautify --smoothness 5
+
+# View chain
+camfx get-effects
+```
+
+### Lazy Camera
+
+```bash
+# Start with lazy camera - camera only activates when source is used
+camfx start --effect blur --lazy-camera --dbus
+
+# Connect an application to the virtual camera
+# Camera will automatically start
+
+# Disconnect all applications
+# Camera will automatically stop
+```
+
+## Testing
+
+Run the test suite:
+
+```bash
+# Run all tests
+pytest
+
+# Run with verbose output
+pytest -v
+
+# Run specific test file
+pytest tests/test_effect_chaining.py
+```
+
+## Development Notes
+
+- Effect chaining supports applying multiple effects in sequence
+- D-Bus interface enables runtime effect control
+- Lazy camera mode saves resources by only activating when needed
+- Preview command can show output from running camfx instance
+- All effects are thread-safe and can be changed at runtime
+
+## Contributing
+
 Contributions welcome! Areas for improvement:
 - Add v4l2loopback backend for broad application compatibility
-- Improve virtual camera detection and registration
 - Add more effects (color grading, filters, etc.)
 - Performance optimizations
+- GUI control panel using D-Bus interface
 
-License
--------
+## License
+
 MIT License - see [LICENSE](LICENSE) file for details.
-
-
