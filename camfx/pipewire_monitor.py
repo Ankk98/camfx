@@ -98,22 +98,52 @@ class PipeWireSourceMonitor:
 				else:
 					# Find all links connected to our source node
 					source_id = source_node.get('id')
-					active_clients = set()
 					
-					for obj in data:
-						if obj.get('type') == 'PipeWire:Interface:Link':
-							link_info = obj.get('info', {})
-							output_node = link_info.get('output-node-id')
-							input_node = link_info.get('input-node-id')
-							
-							# Check if link is connected to our source (as output)
-							if output_node == source_id:
-								# Link is active if input node exists
-								if input_node:
-									active_clients.add(input_node)
-					
-					self.active_clients = active_clients
-					current_state = len(active_clients) > 0
+					# Only proceed if we have a valid source ID
+					if source_id is None:
+						self.active_clients.clear()
+						current_state = False
+					else:
+						active_clients = set()
+						
+						# Get list of all nodes to check if input nodes are actual client nodes
+						all_nodes = {obj.get('id'): obj for obj in data if obj.get('type') == 'PipeWire:Interface:Node'}
+						
+						for obj in data:
+							if obj.get('type') == 'PipeWire:Interface:Link':
+								link_info = obj.get('info', {})
+								output_node = link_info.get('output-node-id')
+								input_node = link_info.get('input-node-id')
+								
+								# Check if link is connected to our source (as output)
+								# Only consider links with valid node IDs
+								if (output_node is not None and 
+								    input_node is not None and
+								    output_node == source_id):
+									# Verify input node exists and is not our own source node
+									# (avoid counting self-referential or invalid links)
+									if input_node != source_id and input_node in all_nodes:
+										# Check if this is likely a client node (not an internal PipeWire node)
+										input_node_obj = all_nodes.get(input_node)
+										if input_node_obj:
+											node_props = input_node_obj.get('info', {}).get('props', {})
+											media_class = node_props.get('media.class', '')
+											# Count nodes that are sinks (clients consuming our source)
+											# Also count nodes with application.name (actual client apps)
+											# Exclude known internal PipeWire nodes
+											application_name = node_props.get('application.name', '')
+											# Filter out known internal nodes (wireplumber, pipewire itself)
+											if (application_name and 
+											    'wireplumber' not in application_name.lower() and
+											    'pipewire' not in application_name.lower()):
+												# This is a real client application
+												active_clients.add(input_node)
+											elif 'Sink' in media_class:
+												# This is a sink node (client consuming our source)
+												active_clients.add(input_node)
+						
+						self.active_clients = active_clients
+						current_state = len(active_clients) > 0
 				
 				# Notify if state changed
 				if current_state != last_state:

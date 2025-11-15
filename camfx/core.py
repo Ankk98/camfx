@@ -18,6 +18,7 @@ class VideoEnhancer:
 		# Camera is not opened immediately if lazy mode is enabled
 		self.cap: Optional[cv2.VideoCapture] = None
 		self.camera_active = False
+		self.should_use_lazy = False  # Will be set based on enable_lazy_camera and enable_virtual
 		
 		# Initialize effect controller
 		self.effect_controller = EffectController()
@@ -41,8 +42,13 @@ class VideoEnhancer:
 		target_width = self.config.get('width')
 		target_height = self.config.get('height')
 		
-		# If lazy camera is disabled, open camera immediately to get dimensions
-		if not enable_lazy_camera:
+		# When virtual camera is enabled, always use lazy camera behavior to save resources
+		# and respect privacy (camera only activates when source is being consumed)
+		# When virtual camera is disabled (preview only), respect the lazy_camera flag
+		self.should_use_lazy = enable_lazy_camera or self.enable_virtual
+		
+		if not self.should_use_lazy:
+			# Preview-only mode without lazy camera: open camera immediately
 			print(f"Opening camera device {input_device}...")
 			self.cap = cv2.VideoCapture(input_device)
 			if not self.cap.isOpened():
@@ -94,7 +100,10 @@ class VideoEnhancer:
 			# For lazy camera, use config dimensions or defaults
 			self.width = target_width or 640
 			self.height = target_height or 480
-			print(f"Lazy camera mode enabled. Camera will start when source is in use.")
+			if self.enable_virtual:
+				print(f"Camera will start automatically when virtual source is in use.")
+			else:
+				print(f"Lazy camera mode enabled. Camera will start when source is in use.")
 		
 		# Virtual camera output via PipeWire (always initialize, even if camera not active)
 		self.virtual_cam = None
@@ -116,9 +125,10 @@ class VideoEnhancer:
 				print("  3. Or use --no-virtual to skip virtual camera initialization")
 				self.virtual_cam = None
 		
-		# Initialize source monitor for lazy camera
+		# Initialize source monitor when virtual camera is enabled and lazy behavior is used
+		# This ensures camera only activates when source is being consumed
 		self.source_monitor = None
-		if enable_lazy_camera:
+		if self.should_use_lazy and self.enable_virtual:
 			from .pipewire_monitor import PipeWireSourceMonitor
 			self.source_monitor = PipeWireSourceMonitor(camera_name)
 			self.source_monitor.start_monitoring(self._on_source_usage_changed)
@@ -222,14 +232,15 @@ class VideoEnhancer:
 				cv2.namedWindow('camfx preview', cv2.WINDOW_NORMAL)
 				print("Preview window created. Press 'q' to quit.")
 			
-			# If lazy camera is disabled, camera should already be started
-			if not self.enable_lazy_camera and not self.camera_active:
+			# If lazy camera is not being used, camera should already be started
+			# (only happens in preview-only mode without lazy camera)
+			if not self.should_use_lazy and not self.camera_active:
 				self._start_camera()
 			
 			frame_count = 0
 			while True:
 				# Check if camera should be active (for lazy camera mode)
-				if self.enable_lazy_camera and not self.camera_active:
+				if self.should_use_lazy and not self.camera_active:
 					# Send a black frame or last frame when camera is off
 					if self.virtual_cam is not None:
 						# Send black frame
