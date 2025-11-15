@@ -153,6 +153,8 @@ Troubleshooting
 
 - **Virtual camera not appearing in apps**: This is expected. See "Known Limitations" above. The PipeWire source is created but not visible to most applications. Use `--preview` mode to test effects, or install v4l2loopback for application compatibility.
 
+- **Chromium/Chrome cannot see the camera**: Check docs/chromium-compatibility-findings.md 
+
 - **Pipeline stuck in PAUSED state**: This usually means wireplumber is not running. Start it with:
   ```bash
   systemctl --user start wireplumber

@@ -117,6 +117,8 @@ class PipeWireOutput:
 			stream_props = Gst.Structure.new_empty("props")
 			stream_props.set_value("media.class", "Video/Source")
 			stream_props.set_value("media.name", name)  # GstStructure handles spaces properly
+			# node.description is used by applications to display the camera name
+			stream_props.set_value("node.description", name)
 			
 			# Set the stream-properties property
 			sink.set_property("stream-properties", stream_props)
@@ -236,6 +238,10 @@ class PipeWireOutput:
 					print(f"Warning: Pipeline state is {state_name}, expected PLAYING", file=sys.stderr)
 				else:
 					print(f"Pipeline is in PLAYING state. Virtual camera '{name}' should be available.", file=sys.stderr)
+					print(f"\nFor Chromium/Chrome compatibility:", file=sys.stderr)
+					print(f"  1. Enable PipeWire support: chrome://flags/#enable-webrtc-pipewire-capturer", file=sys.stderr)
+					print(f"  2. Or launch with: --enable-features=WebRTCPipeWireCapturer", file=sys.stderr)
+					print(f"  3. Verify camera appears in: chrome://settings/content/camera", file=sys.stderr)
 
 	def send(self, frame_rgb: bytes) -> None:
 		"""Send RGB frame data to PipeWire.
