@@ -2,6 +2,7 @@
 
 import glob
 import os
+import sys
 
 import click
 
@@ -303,6 +304,27 @@ def get_effects():
 		print("Error: D-Bus Python bindings not available. Install dbus-python or python-dbus.")
 	except Exception as e:
 		print(f"Error: {e}")
+
+
+@cli.command()
+def gui():
+	"""Launch camfx control panel GUI."""
+	try:
+		from .gui.main_window import main
+		exit_code = main()
+		if exit_code:
+			sys.exit(exit_code)
+	except ImportError as e:
+		print(f"Error importing GUI module: {e}")
+		print("Make sure PyGObject and GTK4 are installed.")
+		print("On Fedora: sudo dnf install python3-gobject gtk4")
+		print("On Ubuntu/Debian: sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0")
+		sys.exit(1)
+	except Exception as e:
+		print(f"Error launching GUI: {e}")
+		import traceback
+		traceback.print_exc()
+		sys.exit(1)
 
 
 if __name__ == '__main__':

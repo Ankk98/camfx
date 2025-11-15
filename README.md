@@ -1,14 +1,15 @@
 # camfx
 
-A lightweight, modular camera video enhancement middleware for Linux that provides real-time effects with live switching and effect chaining, outputting to a virtual camera via PipeWire.
+A lightweight, modular camera video enhancement middleware for Linux that provides real-time effects with live switching and effect chaining, outputting to a virtual camera via PipeWire. Includes both CLI and GTK GUI interfaces for effect management.
 
 ## Features
 
 - **Real-time effects**: Background blur, background replacement, brightness adjustment, face beautification, auto-framing, and eye gaze correction
 - **Effect chaining**: Apply multiple effects in sequence (e.g., blur + brightness + beautify)
 - **Live effect switching**: Change effects at runtime without restarting (via D-Bus)
+- **GTK GUI**: Graphical interface for managing effects and adjusting parameters
 - **On-demand camera**: Camera only activates when virtual source is being consumed (lazy camera mode)
-- **Live preview**: Preview the output from a running camfx instance
+- **Live preview**: Preview the output from a running camfx instance (CLI and GUI)
 - **Person segmentation**: Real-time person segmentation using MediaPipe
 - **CLI with device selection**: Resolution, FPS, and camera selection options
 - **Works on Wayland and X11**
@@ -18,11 +19,12 @@ A lightweight, modular camera video enhancement middleware for Linux that provid
 - ✅ All effects: Working
 - ✅ Effect chaining: Working
 - ✅ Live effect switching: Working (D-Bus)
-- ✅ Preview mode: Working
 - ✅ PipeWire virtual camera: Working
 - ✅ Lazy camera mode: Working
+- ✅ GTK GUI: Working (effect management, parameter controls)
 - ⚠️ Application compatibility: Limited (see Known Limitations below)
-- Preview functionality: Not working, preview hangs with black output
+- ⚠️ GUI Live Preview: Not working (pipeline stuck in PAUSED state, needs investigation)
+- ⚠️ Preview mode using cli: Not Working
 
 ## Prerequisites
 
@@ -60,9 +62,13 @@ pip install -e .
 ## Quickstart
 
 ```bash
-# Start virtual camera with blur effect
+# Start virtual camera with blur effect (with D-Bus for GUI/runtime control)
 camfx start --effect blur --strength 25 --dbus
 
+# Option 1: Use the GUI for easy effect management
+camfx gui
+
+# Option 2: Use CLI commands for effect control
 # In another terminal, preview the output
 camfx preview
 
@@ -142,6 +148,21 @@ camfx remove-effect --index 0
 # Get current effect chain
 camfx get-effects
 ```
+
+### GTK GUI
+
+```bash
+# Launch the GTK control panel
+camfx gui
+```
+
+The GUI provides:
+- **Effect Management**: Add, remove, and reorder effects in the chain
+- **Parameter Controls**: Adjust effect parameters with sliders and controls
+- **Live Preview**: Preview the virtual camera output (⚠️ Currently not working - see Status)
+- **Effect Chain Display**: View all active effects with their current parameters
+
+**Note**: The GUI requires `camfx start --dbus` to be running for full functionality. The live preview feature is currently not working (pipeline stuck in PAUSED state) and needs investigation.
 
 ### Utility Commands
 
