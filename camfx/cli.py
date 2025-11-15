@@ -1,194 +1,154 @@
+"""Simple CLI for camfx."""
+
 import glob
 import os
 
 import click
 
+from .core import VideoEnhancer
+
 
 @click.group()
 def cli():
+	"""camfx - Camera effects with live switching and chaining."""
 	pass
 
 
 @cli.command()
-@click.option('--strength', default=25, type=int, help='Kernel size for Gaussian blur (must be odd, e.g., 3,5,7,...). Even values will be adjusted to next odd number.')
 @click.option('--input', 'input_index', default=0, type=int, help='Camera index (e.g., 0)')
-@click.option('--preview', is_flag=True, default=False, help='Show a preview window')
-@click.option('--no-virtual', is_flag=True, default=False, help='Disable virtual camera output (preview only)')
 @click.option('--width', default=None, type=int, help='Input capture width')
 @click.option('--height', default=None, type=int, help='Input capture height')
 @click.option('--fps', default=30, type=int, help='Virtual camera FPS')
 @click.option('--name', default='camfx', type=str, help='Name for the virtual camera source')
-def blur(strength: int, input_index: int, preview: bool, no_virtual: bool, width: int | None, height: int | None, fps: int, name: str):
-	"""Apply background blur effect to camera feed."""
-	# Validate and adjust strength value
-	if strength <= 0:
-		raise click.ClickException(f"Invalid strength value: {strength}. Strength must be a positive integer (e.g., 3, 5, 7, ...)")
+@click.option('--lazy-camera', is_flag=True, default=False, help='Only use camera when virtual source is actively consumed')
+@click.option('--dbus', is_flag=True, default=False, help='Enable D-Bus service for runtime effect control')
+@click.option('--effect', type=click.Choice(['blur', 'replace', 'brightness', 'beautify', 'autoframe', 'gaze-correct']), help='Initial effect to apply')
+@click.option('--strength', type=int, help='For blur effect (must be odd)')
+@click.option('--brightness', type=int, help='For brightness effect (-100 to 100)')
+@click.option('--contrast', type=float, help='For brightness effect (0.5 to 2.0)')
+@click.option('--smoothness', type=int, help='For beautify effect (1-15)')
+@click.option('--padding', type=float, help='For autoframe effect')
+@click.option('--min-zoom', type=float, help='For autoframe effect')
+@click.option('--max-zoom', type=float, help='For autoframe effect')
+def start(input_index: int, width: int | None, height: int | None, fps: int, name: str, 
+         lazy_camera: bool, dbus: bool, effect: str | None, **kwargs):
+	"""Start virtual camera with optional initial effect.
 	
-	original_strength = strength
-	if strength % 2 == 0:
-		strength = strength + 1  # Round up to next odd number
-		click.echo(f"Warning: Strength must be odd. Adjusted {original_strength} to {strength}.", err=True)
-	
-	# Defer heavy imports to avoid slowing other commands
-	from .core import VideoEnhancer
-	import cv2  # noqa: F401
-	enhancer = VideoEnhancer(
-		input_index,
-		effect_type='blur',
-		config={'width': width, 'height': height, 'fps': fps, 'enable_virtual': (not no_virtual), 'camera_name': name},
-	)
-	try:
-		enhancer.run(preview=preview, strength=strength)
-	except KeyboardInterrupt:
-		print("Stopped")
-	except ValueError as e:
-		# Re-raise as ClickException for better CLI error formatting
-		raise click.ClickException(str(e))
-
-
-@cli.command()
-@click.option('--image', required=True, type=str, help='Path to background image')
-@click.option('--input', 'input_index', default=0, type=int, help='Camera index (e.g., 0)')
-@click.option('--preview', is_flag=True, default=False, help='Show a preview window')
-@click.option('--no-virtual', is_flag=True, default=False, help='Disable virtual camera output (preview only)')
-@click.option('--width', default=None, type=int, help='Input capture width')
-@click.option('--height', default=None, type=int, help='Input capture height')
-@click.option('--fps', default=30, type=int, help='Virtual camera FPS')
-@click.option('--name', default='camfx', type=str, help='Name for the virtual camera source')
-def replace(image: str, input_index: int, preview: bool, no_virtual: bool, width: int | None, height: int | None, fps: int, name: str):
-	"""Replace background with a static image."""
-	# Defer heavy imports to avoid slowing other commands
-	from .core import VideoEnhancer
-	import cv2
-	bg = cv2.imread(image)
-	if bg is None:
-		raise click.ClickException(f"Failed to read background image: {image}")
-	enhancer = VideoEnhancer(
-		input_index,
-		effect_type='replace',
-		config={'width': width, 'height': height, 'fps': fps, 'enable_virtual': (not no_virtual), 'camera_name': name},
-	)
-	try:
-		enhancer.run(preview=preview, background=bg)
-	except KeyboardInterrupt:
-		print("Stopped")
-
-
-@cli.command()
-@click.option('--brightness', default=0, type=int, help='Brightness adjustment (-100 to 100, 0 = no change)')
-@click.option('--contrast', default=1.0, type=float, help='Contrast multiplier (0.5 to 2.0, 1.0 = no change)')
-@click.option('--face-only', is_flag=True, default=False, help='Apply brightness/contrast only to face region (requires segmentation)')
-@click.option('--input', 'input_index', default=0, type=int, help='Camera index (e.g., 0)')
-@click.option('--preview', is_flag=True, default=False, help='Show a preview window')
-@click.option('--no-virtual', is_flag=True, default=False, help='Disable virtual camera output (preview only)')
-@click.option('--width', default=None, type=int, help='Input capture width')
-@click.option('--height', default=None, type=int, help='Input capture height')
-@click.option('--fps', default=30, type=int, help='Virtual camera FPS')
-@click.option('--name', default='camfx', type=str, help='Name for the virtual camera source')
-def brightness(brightness: int, contrast: float, face_only: bool, input_index: int, preview: bool, no_virtual: bool, width: int | None, height: int | None, fps: int, name: str):
-	"""Adjust brightness and contrast of the camera feed."""
-	from .core import VideoEnhancer
-	enhancer = VideoEnhancer(
-		input_index,
-		effect_type='brightness',
-		config={'width': width, 'height': height, 'fps': fps, 'enable_virtual': (not no_virtual), 'camera_name': name},
-	)
-	try:
-		enhancer.run(preview=preview, brightness=brightness, contrast=contrast, face_only=face_only)
-	except KeyboardInterrupt:
-		print("Stopped")
-	except ValueError as e:
-		raise click.ClickException(str(e))
-
-
-@cli.command()
-@click.option('--smoothness', default=5, type=int, help='Skin smoothing strength (1-15, higher = more smoothing)')
-@click.option('--input', 'input_index', default=0, type=int, help='Camera index (e.g., 0)')
-@click.option('--preview', is_flag=True, default=False, help='Show a preview window')
-@click.option('--no-virtual', is_flag=True, default=False, help='Disable virtual camera output (preview only)')
-@click.option('--width', default=None, type=int, help='Input capture width')
-@click.option('--height', default=None, type=int, help='Input capture height')
-@click.option('--fps', default=30, type=int, help='Virtual camera FPS')
-@click.option('--name', default='camfx', type=str, help='Name for the virtual camera source')
-def beautify(smoothness: int, input_index: int, preview: bool, no_virtual: bool, width: int | None, height: int | None, fps: int, name: str):
-	"""Apply skin smoothing and face beautification effects."""
-	from .core import VideoEnhancer
-	enhancer = VideoEnhancer(
-		input_index,
-		effect_type='beautify',
-		config={'width': width, 'height': height, 'fps': fps, 'enable_virtual': (not no_virtual), 'camera_name': name},
-	)
-	try:
-		enhancer.run(preview=preview, smoothness=smoothness)
-	except KeyboardInterrupt:
-		print("Stopped")
-	except ValueError as e:
-		raise click.ClickException(str(e))
-
-
-@cli.command()
-@click.option('--padding', default=0.3, type=float, help='Padding around face as fraction of face size (0.0-1.0)')
-@click.option('--min-zoom', default=1.0, type=float, help='Minimum zoom level (1.0 = no zoom)')
-@click.option('--max-zoom', default=2.0, type=float, help='Maximum zoom level')
-@click.option('--input', 'input_index', default=0, type=int, help='Camera index (e.g., 0)')
-@click.option('--preview', is_flag=True, default=False, help='Show a preview window')
-@click.option('--no-virtual', is_flag=True, default=False, help='Disable virtual camera output (preview only)')
-@click.option('--width', default=None, type=int, help='Input capture width')
-@click.option('--height', default=None, type=int, help='Input capture height')
-@click.option('--fps', default=30, type=int, help='Virtual camera FPS')
-@click.option('--name', default='camfx', type=str, help='Name for the virtual camera source')
-def autoframe(padding: float, min_zoom: float, max_zoom: float, input_index: int, preview: bool, no_virtual: bool, width: int | None, height: int | None, fps: int, name: str):
-	"""Automatically crop and center the frame on the detected face."""
-	from .core import VideoEnhancer
-	enhancer = VideoEnhancer(
-		input_index,
-		effect_type='autoframe',
-		config={'width': width, 'height': height, 'fps': fps, 'enable_virtual': (not no_virtual), 'camera_name': name},
-	)
-	try:
-		enhancer.run(preview=preview, padding=padding, min_zoom=min_zoom, max_zoom=max_zoom)
-	except KeyboardInterrupt:
-		print("Stopped")
-	except ValueError as e:
-		raise click.ClickException(str(e))
-
-
-@cli.command('gaze-correct')
-@click.option('--strength', default=0.5, type=float, help='Correction strength (0.0-1.0, higher = more correction)')
-@click.option('--input', 'input_index', default=0, type=int, help='Camera index (e.g., 0)')
-@click.option('--preview', is_flag=True, default=False, help='Show a preview window')
-@click.option('--no-virtual', is_flag=True, default=False, help='Disable virtual camera output (preview only)')
-@click.option('--width', default=None, type=int, help='Input capture width')
-@click.option('--height', default=None, type=int, help='Input capture height')
-@click.option('--fps', default=30, type=int, help='Virtual camera FPS')
-@click.option('--name', default='camfx', type=str, help='Name for the virtual camera source')
-def gaze_correct(strength: float, input_index: int, preview: bool, no_virtual: bool, width: int | None, height: int | None, fps: int, name: str):
-	"""Correct eye gaze to appear as if looking directly at camera.
-	
-	Uses MediaPipe Face Mesh iris landmarks and affine transformation
-	to warp eye regions for natural-looking gaze correction.
-	Works best for small gaze deviations (< 15 degrees).
+	Use D-Bus commands (set-effect, add-effect) to change effects at runtime.
 	"""
-	if strength < 0.0 or strength > 1.0:
-		raise click.ClickException(f"Strength must be between 0.0 and 1.0, got {strength}")
+	# Build initial effect config
+	initial_config = {}
+	if effect:
+		for key, value in kwargs.items():
+			if value is not None:
+				initial_config[key] = value
 	
-	from .core import VideoEnhancer
 	enhancer = VideoEnhancer(
 		input_index,
-		effect_type='gaze-correct',
-		config={'width': width, 'height': height, 'fps': fps, 'enable_virtual': (not no_virtual), 'camera_name': name},
+		effect_type=effect or None,
+		config={
+			'width': width,
+			'height': height,
+			'fps': fps,
+			'enable_virtual': True,
+			'camera_name': name,
+			'enable_dbus': dbus,
+			**initial_config,
+		},
+		enable_lazy_camera=lazy_camera,
 	)
+	
 	try:
-		enhancer.run(preview=preview, strength=strength)
+		enhancer.run(preview=False)
 	except KeyboardInterrupt:
 		print("Stopped")
-	except ValueError as e:
-		raise click.ClickException(str(e))
+
+
+@cli.command()
+@click.option('--name', default='camfx', type=str, help='Name of the camfx virtual camera source to preview')
+@click.option('--input', 'input_index', default=0, type=int, help='Camera index (fallback if virtual camera not found)')
+@click.option('--effect', type=click.Choice(['blur', 'replace', 'brightness', 'beautify', 'autoframe', 'gaze-correct']), help='Effect to preview (only used if virtual camera not found)')
+@click.option('--strength', type=int, help='For blur effect (must be odd)')
+@click.option('--brightness', type=int, help='For brightness effect (-100 to 100)')
+@click.option('--contrast', type=float, help='For brightness effect (0.5 to 2.0)')
+@click.option('--smoothness', type=int, help='For beautify effect (1-15)')
+@click.option('--padding', type=float, help='For autoframe effect')
+@click.option('--min-zoom', type=float, help='For autoframe effect')
+@click.option('--max-zoom', type=float, help='For autoframe effect')
+def preview(name: str, input_index: int, effect: str | None, **kwargs):
+	"""Preview output from running camfx instance, or camera feed with optional effect.
+	
+	If a camfx virtual camera is running, previews its output.
+	Otherwise, falls back to previewing camera directly with optional effect.
+	"""
+	import cv2
+	
+	# Try to connect to PipeWire virtual camera first
+	try:
+		from .input_pipewire import PipeWireInput
+		pw_input = PipeWireInput(source_name=name)
+		print(f"Previewing output from '{name}' virtual camera")
+		print("Press 'q' to quit.")
+		
+		cv2.namedWindow('camfx preview', cv2.WINDOW_NORMAL)
+		
+		try:
+			frame_count = 0
+			no_frame_count = 0
+			while True:
+				ret, frame = pw_input.read()
+				if ret and frame is not None:
+					cv2.imshow('camfx preview', frame)
+					frame_count += 1
+					no_frame_count = 0
+					if frame_count == 1:
+						print("Receiving frames from virtual camera...")
+				else:
+					# No frame available, wait a bit
+					no_frame_count += 1
+					if no_frame_count == 100:  # ~1 second at 10ms intervals
+						print("Warning: No frames received. Is camfx start running?")
+					import time
+					time.sleep(0.01)
+				
+				key = cv2.waitKey(1) & 0xFF
+				if key == ord('q'):
+					break
+		finally:
+			pw_input.release()
+			cv2.destroyAllWindows()
+		
+	except RuntimeError as e:
+		# Virtual camera not found, fall back to direct camera preview
+		print(f"Virtual camera '{name}' not found: {e}")
+		print("Falling back to direct camera preview...")
+		
+		# Build effect config
+		effect_config = {}
+		if effect:
+			for key, value in kwargs.items():
+				if value is not None:
+					effect_config[key] = value
+		
+		enhancer = VideoEnhancer(
+			input_index,
+			effect_type=effect or None,
+			config={
+				'enable_virtual': False,
+				**effect_config,
+			},
+			enable_lazy_camera=False,
+		)
+		
+		try:
+			enhancer.run(preview=True, **effect_config)
+		except KeyboardInterrupt:
+			print("Stopped")
 
 
 @cli.command('list-devices')
 def list_devices():
-	"""List available camera device nodes and names via sysfs (non-blocking)."""
+	"""List available camera device nodes and names."""
 	paths = sorted(glob.glob('/dev/video*'))
 	print("Detected device nodes:", ", ".join(paths) if paths else "none")
 	for dev in paths:
@@ -202,7 +162,105 @@ def list_devices():
 		print(f"{dev}: {name}")
 
 
+@cli.command('set-effect')
+@click.option('--effect', required=True, type=click.Choice(['blur', 'replace', 'brightness', 'beautify', 'autoframe', 'gaze-correct']))
+@click.option('--strength', type=int, help='For blur effect (must be odd)')
+@click.option('--brightness', type=int, help='For brightness effect (-100 to 100)')
+@click.option('--contrast', type=float, help='For brightness effect (0.5 to 2.0)')
+@click.option('--smoothness', type=int, help='For beautify effect (1-15)')
+@click.option('--padding', type=float, help='For autoframe effect')
+@click.option('--min-zoom', type=float, help='For autoframe effect')
+@click.option('--max-zoom', type=float, help='For autoframe effect')
+def set_effect(effect, **kwargs):
+	"""Change effect at runtime via D-Bus (replaces all effects)."""
+	try:
+		import dbus
+		bus = dbus.SessionBus()
+		service = bus.get_object('org.camfx.Control1', '/org/camfx/Control1')
+		control = dbus.Interface(service, 'org.camfx.Control1')
+		
+		# Build config dict from kwargs
+		config = {}
+		for key, value in kwargs.items():
+			if value is not None:
+				config[key] = value
+		
+		success = control.SetEffect(effect, config)
+		if success:
+			print(f"Effect changed to: {effect}")
+		else:
+			print(f"Failed to change effect to: {effect}")
+	except dbus.exceptions.DBusException as e:
+		print(f"Error connecting to camfx D-Bus service: {e}")
+		print("Make sure camfx is running with D-Bus support enabled (camfx start --dbus)")
+	except ImportError:
+		print("Error: D-Bus Python bindings not available. Install dbus-python or python-dbus.")
+	except Exception as e:
+		print(f"Error: {e}")
+
+
+@cli.command('add-effect')
+@click.option('--effect', required=True, type=click.Choice(['blur', 'replace', 'brightness', 'beautify', 'autoframe', 'gaze-correct']))
+@click.option('--strength', type=int, help='For blur effect (must be odd)')
+@click.option('--brightness', type=int, help='For brightness effect (-100 to 100)')
+@click.option('--contrast', type=float, help='For brightness effect (0.5 to 2.0)')
+@click.option('--smoothness', type=int, help='For beautify effect (1-15)')
+@click.option('--padding', type=float, help='For autoframe effect')
+@click.option('--min-zoom', type=float, help='For autoframe effect')
+@click.option('--max-zoom', type=float, help='For autoframe effect')
+def add_effect(effect, **kwargs):
+	"""Add effect to chain at runtime via D-Bus."""
+	try:
+		import dbus
+		bus = dbus.SessionBus()
+		service = bus.get_object('org.camfx.Control1', '/org/camfx/Control1')
+		control = dbus.Interface(service, 'org.camfx.Control1')
+		
+		# Build config dict from kwargs
+		config = {}
+		for key, value in kwargs.items():
+			if value is not None:
+				config[key] = value
+		
+		success = control.AddEffect(effect, config)
+		if success:
+			print(f"Effect added to chain: {effect}")
+		else:
+			print(f"Failed to add effect: {effect}")
+	except dbus.exceptions.DBusException as e:
+		print(f"Error connecting to camfx D-Bus service: {e}")
+		print("Make sure camfx is running with D-Bus support enabled (camfx start --dbus)")
+	except ImportError:
+		print("Error: D-Bus Python bindings not available. Install dbus-python or python-dbus.")
+	except Exception as e:
+		print(f"Error: {e}")
+
+
+@cli.command('get-effects')
+def get_effects():
+	"""Get current effect chain via D-Bus."""
+	try:
+		import dbus
+		bus = dbus.SessionBus()
+		service = bus.get_object('org.camfx.Control1', '/org/camfx/Control1')
+		control = dbus.Interface(service, 'org.camfx.Control1')
+		
+		effects = control.GetCurrentEffects()
+		if not effects:
+			print("No effects in chain")
+		else:
+			print(f"Current effect chain ({len(effects)} effects):")
+			for i, (effect_type, class_name, config) in enumerate(effects):
+				config_str = ", ".join(f"{k}={v}" for k, v in config.items())
+				print(f"  {i}: {effect_type} ({class_name}) - {config_str}")
+	except dbus.exceptions.DBusException as e:
+		print(f"Error connecting to camfx D-Bus service: {e}")
+		print("Make sure camfx is running with D-Bus support enabled (camfx start --dbus)")
+	except ImportError:
+		print("Error: D-Bus Python bindings not available. Install dbus-python or python-dbus.")
+	except Exception as e:
+		print(f"Error: {e}")
+
+
 if __name__ == '__main__':
 	cli()
-
-

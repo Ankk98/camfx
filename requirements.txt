@@ -3,5 +3,7 @@ opencv-python==4.8.0
 PyGObject>=3.42.0
 click==8.1.7
 numpy==1.24.0
+dbus-python>=1.2.18
+pytest>=7.0.0
 
 

@@ -10,6 +10,12 @@ class BackgroundBlur:
 		if strength % 2 == 0:
 			raise ValueError(f"Strength must be odd (Gaussian blur requires odd kernel size), got {strength}. Use an odd number like {strength + 1} or {strength - 1}")
 		frame_f = frame.astype(np.float32)
+		
+		# If no mask provided, blur the entire frame
+		if mask is None:
+			blurred = cv2.GaussianBlur(frame_f, (strength, strength), 0)
+			return np.clip(blurred, 0, 255).astype(np.uint8)
+		
 		mask_f = np.clip(mask.astype(np.float32), 0.0, 1.0)
 		blurred = cv2.GaussianBlur(frame_f, (strength, strength), 0)
 		mask_3d = np.stack((mask_f,) * 3, axis=-1)
