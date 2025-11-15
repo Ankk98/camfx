@@ -33,17 +33,19 @@ class TestEffectChain:
 		assert not np.array_equal(result, frame)
 		assert result.shape == frame.shape
 	
-	def test_chain_order(self):
-		"""Test that effects are applied in order."""
+	def test_chain_update_same_type(self):
+		"""Test that adding same effect type updates it instead of duplicating."""
 		chain = EffectChain()
 		chain.add_effect('brightness', {'brightness': 10})
+		assert len(chain) == 1
+		
+		# Adding same type should update, not duplicate
 		chain.add_effect('brightness', {'brightness': 5})
+		assert len(chain) == 1  # Still only one effect
 		
-		frame = np.ones((100, 100, 3), dtype=np.uint8) * 128
-		result = chain.apply(frame, None)
-		
-		# Should apply both brightness adjustments sequentially
-		assert result.shape == frame.shape
+		# Verify the config was updated
+		effect, config = chain.effects[0]
+		assert config['brightness'] == 5
 	
 	def test_blur_with_mask(self):
 		"""Test blur effect requires mask."""
@@ -125,44 +127,82 @@ class TestEffectChain:
 		assert result.shape == frame.shape
 	
 	def test_chain_remove_effect(self):
-		"""Test removing effect from chain."""
+		"""Test removing effect from chain by index."""
 		chain = EffectChain()
 		chain.add_effect('brightness', {'brightness': 10})
-		chain.add_effect('brightness', {'brightness': 5})
+		chain.add_effect('blur', {'strength': 25})
 		
 		assert len(chain) == 2
 		chain.remove_effect(0)
+		assert len(chain) == 1
+		# Remaining effect should be blur
+		effect, config = chain.effects[0]
+		assert effect.__class__.__name__ == 'BackgroundBlur'
+	
+	def test_chain_remove_effect_by_type(self):
+		"""Test removing effect from chain by type."""
+		chain = EffectChain()
+		chain.add_effect('brightness', {'brightness': 10})
+		chain.add_effect('blur', {'strength': 25})
+		
+		assert len(chain) == 2
+		success = chain.remove_effect_by_type('brightness')
+		assert success is True
+		assert len(chain) == 1
+		# Remaining effect should be blur
+		effect, config = chain.effects[0]
+		assert effect.__class__.__name__ == 'BackgroundBlur'
+	
+	def test_chain_remove_effect_by_type_not_found(self):
+		"""Test removing effect by type when it doesn't exist."""
+		chain = EffectChain()
+		chain.add_effect('brightness', {'brightness': 10})
+		
+		success = chain.remove_effect_by_type('blur')
+		assert success is False
 		assert len(chain) == 1
 	
 	def test_chain_clear(self):
 		"""Test clearing chain."""
 		chain = EffectChain()
 		chain.add_effect('brightness', {'brightness': 10})
-		chain.add_effect('brightness', {'brightness': 5})
+		chain.add_effect('blur', {'strength': 25})
 		
 		assert len(chain) == 2
 		chain.clear()
 		assert len(chain) == 0
 	
-	def test_chain_duplicate_effects(self):
-		"""Test that duplicate effects can be added."""
+	def test_chain_update_effect_multiple_times(self):
+		"""Test that updating same effect type multiple times works."""
 		chain = EffectChain()
 		chain.add_effect('brightness', {'brightness': 10})
+		assert len(chain) == 1
+		
 		chain.add_effect('brightness', {'brightness': 20})
+		assert len(chain) == 1
+		effect, config = chain.effects[0]
+		assert config['brightness'] == 20
+		
 		chain.add_effect('brightness', {'brightness': 30})
-		
-		assert len(chain) == 3
-		
-		frame = np.ones((100, 100, 3), dtype=np.uint8) * 128
-		result = chain.apply(frame, None)
-		assert result.shape == frame.shape
+		assert len(chain) == 1
+		effect, config = chain.effects[0]
+		assert config['brightness'] == 30
 	
 	def test_chain_mixed_effects(self):
 		"""Test chain with multiple different effects."""
 		chain = EffectChain()
 		chain.add_effect('brightness', {'brightness': 10})
 		chain.add_effect('blur', {'strength': 25})
+		# Adding brightness again should update the first one, not add a duplicate
 		chain.add_effect('brightness', {'brightness': 5})
+		
+		# Should have only 2 effects (brightness updated, blur added)
+		assert len(chain) == 2
+		
+		# Verify brightness was updated
+		effect1, config1 = chain.effects[0]
+		assert effect1.__class__.__name__ == 'BrightnessAdjustment'
+		assert config1['brightness'] == 5
 		
 		frame = np.ones((100, 100, 3), dtype=np.uint8) * 128
 		mask = np.ones((100, 100), dtype=np.float32) * 0.5
@@ -207,7 +247,7 @@ class TestEffectController:
 		controller = EffectController()
 		
 		controller.add_effect('brightness', {'brightness': 10})
-		controller.add_effect('brightness', {'brightness': 5})
+		controller.add_effect('blur', {'strength': 25})
 		assert len(controller.get_chain()) == 2
 		
 		controller.set_effect('brightness', {'brightness': 20})
@@ -221,19 +261,49 @@ class TestEffectController:
 		controller.add_effect('brightness', {'brightness': 10})
 		assert len(controller.get_chain()) == 1
 		
-		controller.add_effect('brightness', {'brightness': 5})
+		# Adding different effect type should add it
+		controller.add_effect('blur', {'strength': 25})
 		assert len(controller.get_chain()) == 2
+		
+		# Adding same effect type should update it
+		controller.add_effect('brightness', {'brightness': 5})
+		assert len(controller.get_chain()) == 2  # Still 2, brightness was updated
+		
+		# Verify brightness was updated
+		chain = controller.get_chain()
+		effect, config = chain.effects[0]
+		assert effect.__class__.__name__ == 'BrightnessAdjustment'
+		assert config['brightness'] == 5
 	
 	def test_remove_effect(self):
-		"""Test removing effect from chain."""
+		"""Test removing effect from chain by index."""
 		controller = EffectController()
 		
 		controller.add_effect('brightness', {'brightness': 10})
-		controller.add_effect('brightness', {'brightness': 5})
-		controller.add_effect('brightness', {'brightness': 3})
+		controller.add_effect('blur', {'strength': 25})
+		controller.add_effect('beautify', {'smoothness': 5})
 		
 		assert len(controller.get_chain()) == 3
 		controller.remove_effect(1)
+		assert len(controller.get_chain()) == 2
+	
+	def test_remove_effect_by_type(self):
+		"""Test removing effect from chain by type."""
+		controller = EffectController()
+		
+		controller.add_effect('brightness', {'brightness': 10})
+		controller.add_effect('blur', {'strength': 25})
+		controller.add_effect('beautify', {'smoothness': 5})
+		
+		assert len(controller.get_chain()) == 3
+		
+		success = controller.remove_effect_by_type('blur')
+		assert success is True
+		assert len(controller.get_chain()) == 2
+		
+		# Try removing non-existent effect
+		success = controller.remove_effect_by_type('gaze-correct')
+		assert success is False
 		assert len(controller.get_chain()) == 2
 	
 	def test_clear_chain(self):
@@ -241,7 +311,7 @@ class TestEffectController:
 		controller = EffectController()
 		
 		controller.add_effect('brightness', {'brightness': 10})
-		controller.add_effect('brightness', {'brightness': 5})
+		controller.add_effect('blur', {'strength': 25})
 		
 		assert len(controller.get_chain()) == 2
 		controller.clear_chain()
@@ -303,8 +373,50 @@ class TestEffectController:
 		
 		# Should not have any errors
 		assert len(errors) == 0
-		# Should have added effects (exact count may vary due to race conditions)
+		# Should have effects (may be updated multiple times due to race conditions)
+		# But since we update instead of duplicate, should have at least one
 		assert len(controller.get_chain()) > 0
+	
+	def test_thread_safety_update_and_remove(self):
+		"""Test thread safety when updating and removing effects concurrently."""
+		import threading
+		
+		controller = EffectController()
+		controller.add_effect('brightness', {'brightness': 10})
+		controller.add_effect('blur', {'strength': 25})
+		errors = []
+		
+		def update_effects():
+			try:
+				for i in range(5):
+					controller.add_effect('brightness', {'brightness': i * 10})
+			except Exception as e:
+				errors.append(e)
+		
+		def remove_effects():
+			try:
+				for _ in range(3):
+					controller.remove_effect_by_type('blur')
+					controller.add_effect('blur', {'strength': 30})
+			except Exception as e:
+				errors.append(e)
+		
+		threads = [
+			threading.Thread(target=update_effects) for _ in range(3)
+		] + [
+			threading.Thread(target=remove_effects) for _ in range(2)
+		]
+		
+		for t in threads:
+			t.start()
+		for t in threads:
+			t.join()
+		
+		# Should not have any errors
+		assert len(errors) == 0
+		# Chain should still be valid
+		chain = controller.get_chain()
+		assert len(chain) >= 0  # At least 0 (could be empty if all removed)
 
 
 class TestEffectChainingEdgeCases:
@@ -374,12 +486,17 @@ class TestEffectChainingEdgeCases:
 		"""Test removing all effects one by one."""
 		chain = EffectChain()
 		chain.add_effect('brightness', {'brightness': 10})
-		chain.add_effect('brightness', {'brightness': 5})
-		chain.add_effect('brightness', {'brightness': 3})
+		chain.add_effect('blur', {'strength': 25})
+		chain.add_effect('beautify', {'smoothness': 5})
 		
-		while len(chain) > 0:
-			chain.remove_effect(0)
+		# Remove by type
+		chain.remove_effect_by_type('brightness')
+		assert len(chain) == 2
 		
+		chain.remove_effect_by_type('blur')
+		assert len(chain) == 1
+		
+		chain.remove_effect_by_type('beautify')
 		assert len(chain) == 0
 		
 		# Should still work with empty chain
@@ -403,11 +520,89 @@ class TestEffectChainingEdgeCases:
 		assert config['brightness'] == 10
 		assert config['contrast'] == 1.5
 		
-		# Remove and re-add should preserve config
-		chain.remove_effect(0)
-		chain.add_effect('brightness', {'brightness': 10, 'contrast': 1.5})
-		
+		# Update should replace entire config (not merge)
+		chain.add_effect('brightness', {'brightness': 20})
 		effect, config = chain.effects[0]
-		assert config['brightness'] == 10
-		assert config['contrast'] == 1.5
+		assert config['brightness'] == 20
+		# Contrast is not in new config, so it won't be in the updated config
+		
+		# Full config update
+		chain.add_effect('brightness', {'brightness': 15, 'contrast': 2.0})
+		effect, config = chain.effects[0]
+		assert config['brightness'] == 15
+		assert config['contrast'] == 2.0
+	
+	def test_chain_update_preserves_position(self):
+		"""Test that updating an effect preserves its position in chain."""
+		chain = EffectChain()
+		chain.add_effect('brightness', {'brightness': 10})
+		chain.add_effect('blur', {'strength': 25})
+		chain.add_effect('beautify', {'smoothness': 5})
+		
+		# Update brightness - should stay at position 0
+		chain.add_effect('brightness', {'brightness': 20})
+		assert len(chain) == 3
+		effect, config = chain.effects[0]
+		assert effect.__class__.__name__ == 'BrightnessAdjustment'
+		assert config['brightness'] == 20
+		
+		# Verify other effects are still in correct positions
+		effect1, _ = chain.effects[1]
+		assert effect1.__class__.__name__ == 'BackgroundBlur'
+		effect2, _ = chain.effects[2]
+		assert effect2.__class__.__name__ == 'FaceBeautification'
+	
+	def test_chain_update_all_effect_types(self):
+		"""Test updating all different effect types."""
+		chain = EffectChain()
+		
+		# Add all effect types
+		chain.add_effect('blur', {'strength': 25})
+		chain.add_effect('brightness', {'brightness': 10})
+		chain.add_effect('beautify', {'smoothness': 5})
+		chain.add_effect('autoframe', {'padding': 0.3})
+		chain.add_effect('gaze-correct', {'strength': 0.5})
+		
+		assert len(chain) == 5
+		
+		# Update each one
+		chain.add_effect('blur', {'strength': 35})
+		chain.add_effect('brightness', {'brightness': 20})
+		chain.add_effect('beautify', {'smoothness': 10})
+		chain.add_effect('autoframe', {'padding': 0.5})
+		chain.add_effect('gaze-correct', {'strength': 0.8})
+		
+		assert len(chain) == 5  # Still 5, all were updated
+		
+		# Verify updates
+		_, config = chain.effects[0]
+		assert config['strength'] == 35
+		_, config = chain.effects[1]
+		assert config['brightness'] == 20
+		_, config = chain.effects[2]
+		assert config['smoothness'] == 10
+		_, config = chain.effects[3]
+		assert config['padding'] == 0.5
+		_, config = chain.effects[4]
+		assert config['strength'] == 0.8
+	
+	def test_chain_remove_effect_by_type_empty_chain(self):
+		"""Test removing effect by type from empty chain."""
+		chain = EffectChain()
+		success = chain.remove_effect_by_type('brightness')
+		assert success is False
+	
+	def test_chain_remove_effect_by_type_multiple_same_type(self):
+		"""Test removing effect by type when only one instance exists (since we prevent duplicates)."""
+		chain = EffectChain()
+		chain.add_effect('brightness', {'brightness': 10})
+		chain.add_effect('blur', {'strength': 25})
+		
+		# Since we prevent duplicates, there should only be one brightness
+		success = chain.remove_effect_by_type('brightness')
+		assert success is True
+		assert len(chain) == 1
+		# Remaining should be blur
+		effect, _ = chain.effects[0]
+		assert effect.__class__.__name__ == 'BackgroundBlur'
 

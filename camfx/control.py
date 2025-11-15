@@ -16,15 +16,41 @@ class EffectChain:
 	def __init__(self):
 		self.effects: List[tuple] = []  # List of (effect_instance, config_dict)
 	
-	def add_effect(self, effect_type: str, config: Dict[str, Any]):
-		"""Add an effect to the chain.
+	def add_effect(self, effect_type: str, config: Dict[str, Any]) -> bool:
+		"""Add an effect to the chain, or update if same type already exists.
 		
 		Args:
 			effect_type: Type of effect ('blur', 'replace', 'brightness', etc.)
 			config: Effect configuration dictionary
+		
+		Returns:
+			True if effect was added or updated successfully
 		"""
+		# Map effect class names to effect types for comparison
+		class_to_type = {
+			'BackgroundBlur': 'blur',
+			'BackgroundReplace': 'replace',
+			'BrightnessAdjustment': 'brightness',
+			'FaceBeautification': 'beautify',
+			'AutoFraming': 'autoframe',
+			'EyeGazeCorrection': 'gaze-correct',
+		}
+		
+		# Check if effect of this type already exists
+		for i, (existing_effect, existing_config) in enumerate(self.effects):
+			existing_class_name = existing_effect.__class__.__name__
+			existing_type = class_to_type.get(existing_class_name, 'unknown')
+			
+			# If same effect type exists, update it (replace effect and config)
+			if existing_type == effect_type:
+				effect = self._create_effect(effect_type)
+				self.effects[i] = (effect, config)
+				return True
+		
+		# No effect of this type exists, add it
 		effect = self._create_effect(effect_type)
 		self.effects.append((effect, config))
+		return True
 	
 	def remove_effect(self, index: int):
 		"""Remove an effect from the chain.
@@ -34,6 +60,35 @@ class EffectChain:
 		"""
 		if 0 <= index < len(self.effects):
 			del self.effects[index]
+	
+	def remove_effect_by_type(self, effect_type: str) -> bool:
+		"""Remove an effect from the chain by type.
+		
+		Args:
+			effect_type: Type of effect to remove ('blur', 'replace', 'brightness', etc.)
+		
+		Returns:
+			True if effect was found and removed, False otherwise
+		"""
+		# Map effect class names to effect types for comparison
+		class_to_type = {
+			'BackgroundBlur': 'blur',
+			'BackgroundReplace': 'replace',
+			'BrightnessAdjustment': 'brightness',
+			'FaceBeautification': 'beautify',
+			'AutoFraming': 'autoframe',
+			'EyeGazeCorrection': 'gaze-correct',
+		}
+		
+		for i, (effect, _) in enumerate(self.effects):
+			effect_class_name = effect.__class__.__name__
+			existing_type = class_to_type.get(effect_class_name, 'unknown')
+			
+			if existing_type == effect_type:
+				del self.effects[i]
+				return True
+		
+		return False
 	
 	def clear(self):
 		"""Clear all effects."""
@@ -123,15 +178,18 @@ class EffectController:
 			self.chain.clear()
 			self.chain.add_effect(effect_type, config)
 	
-	def add_effect(self, effect_type: str, config: Dict[str, Any]):
+	def add_effect(self, effect_type: str, config: Dict[str, Any]) -> bool:
 		"""Add an effect to the chain.
 		
 		Args:
 			effect_type: Type of effect to add
 			config: Effect configuration dictionary
+		
+		Returns:
+			True if effect was added, False if duplicate was detected
 		"""
 		with self.lock:
-			self.chain.add_effect(effect_type, config)
+			return self.chain.add_effect(effect_type, config)
 	
 	def remove_effect(self, index: int):
 		"""Remove an effect from the chain by index.
@@ -141,6 +199,18 @@ class EffectController:
 		"""
 		with self.lock:
 			self.chain.remove_effect(index)
+	
+	def remove_effect_by_type(self, effect_type: str) -> bool:
+		"""Remove an effect from the chain by type.
+		
+		Args:
+			effect_type: Type of effect to remove ('blur', 'replace', 'brightness', etc.)
+		
+		Returns:
+			True if effect was found and removed, False otherwise
+		"""
+		with self.lock:
+			return self.chain.remove_effect_by_type(effect_type)
 	
 	def clear_chain(self):
 		"""Clear all effects from the chain."""

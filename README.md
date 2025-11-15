@@ -72,6 +72,12 @@ camfx set-effect --effect brightness --brightness 10
 # Add another effect to the chain
 camfx add-effect --effect beautify --smoothness 5
 
+# Update an effect (adding same type updates it)
+camfx add-effect --effect brightness --brightness 15
+
+# Remove an effect
+camfx remove-effect --effect blur
+
 # Check current effects
 camfx get-effects
 ```
@@ -124,6 +130,15 @@ camfx set-effect --effect brightness --brightness 10
 # Add effect to chain
 camfx add-effect --effect beautify --smoothness 5
 
+# Update an effect (adding same type updates it, doesn't duplicate)
+camfx add-effect --effect brightness --brightness 15
+
+# Remove an effect by type
+camfx remove-effect --effect blur
+
+# Or remove by index (from get-effects output)
+camfx remove-effect --index 0
+
 # Get current effect chain
 camfx get-effects
 ```
@@ -161,7 +176,7 @@ camfx list-devices
 
 ## Effect Chaining
 
-You can chain multiple effects together:
+You can chain multiple effects together. Each effect type can only appear once in the chain - adding the same effect type again will update its parameters instead of creating a duplicate:
 
 ```bash
 # Start with blur
@@ -173,16 +188,29 @@ camfx add-effect --effect brightness --brightness 10
 # Add beautification
 camfx add-effect --effect beautify --smoothness 5
 
+# Update brightness (updates existing, doesn't duplicate)
+camfx add-effect --effect brightness --brightness 15
+
 # Check the chain
 camfx get-effects
 # Output:
 # Current effect chain (3 effects):
 #   0: blur (BackgroundBlur) - strength=25
-#   1: brightness (BrightnessAdjustment) - brightness=10
+#   1: brightness (BrightnessAdjustment) - brightness=15  # Updated!
 #   2: beautify (FaceBeautification) - smoothness=5
+
+# Remove an effect
+camfx remove-effect --effect blur
+
+# Check again
+camfx get-effects
+# Output:
+# Current effect chain (2 effects):
+#   0: brightness (BrightnessAdjustment) - brightness=15
+#   1: beautify (FaceBeautification) - smoothness=5
 ```
 
-Effects are applied in the order they were added to the chain.
+Effects are applied in the order they appear in the chain. When you update an effect, it maintains its position in the chain.
 
 ## Lazy Camera Mode
 
@@ -294,8 +322,18 @@ camfx add-effect --effect brightness --brightness 10
 # Add beautify
 camfx add-effect --effect beautify --smoothness 5
 
+# Update brightness (updates existing, doesn't duplicate)
+camfx add-effect --effect brightness --brightness 15
+
+# Remove blur
+camfx remove-effect --effect blur
+
 # View chain
 camfx get-effects
+# Output:
+# Current effect chain (2 effects):
+#   0: brightness (BrightnessAdjustment) - brightness=15
+#   1: beautify (FaceBeautification) - smoothness=5
 ```
 
 ### Lazy Camera

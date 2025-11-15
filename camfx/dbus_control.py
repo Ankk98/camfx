@@ -56,19 +56,40 @@ if DBUS_AVAILABLE:
 		
 		@dbus.service.method(INTERFACE_NAME, in_signature='sa{sv}', out_signature='b')
 		def AddEffect(self, effect_type: str, config: Dict[str, Any]) -> bool:
-			"""Add an effect to the chain.
+			"""Add an effect to the chain, or update if same type already exists.
 			
 			Args:
 				effect_type: Type of effect to add
 				config: Effect configuration dictionary
 			
 			Returns:
-				True if successful, False otherwise
+				True if successful, False if error occurred
 			"""
 			try:
-				self.effect_controller.add_effect(effect_type, config)
-				self.EffectChanged('add', effect_type, config)
-				return True
+				# Check if effect of this type already exists
+				chain = self.effect_controller.get_chain()
+				class_to_type = {
+					'BackgroundBlur': 'blur',
+					'BackgroundReplace': 'replace',
+					'BrightnessAdjustment': 'brightness',
+					'FaceBeautification': 'beautify',
+					'AutoFraming': 'autoframe',
+					'EyeGazeCorrection': 'gaze-correct',
+				}
+				action = 'update'
+				for effect, _ in chain.effects:
+					effect_class_name = effect.__class__.__name__
+					existing_type = class_to_type.get(effect_class_name, 'unknown')
+					if existing_type == effect_type:
+						action = 'update'
+						break
+				else:
+					action = 'add'
+				
+				success = self.effect_controller.add_effect(effect_type, config)
+				if success:
+					self.EffectChanged(action, effect_type, config)
+				return success
 			except Exception as e:
 				print(f"Error adding effect: {e}")
 				return False
@@ -87,6 +108,25 @@ if DBUS_AVAILABLE:
 				self.effect_controller.remove_effect(index)
 				self.EffectChanged('remove', str(index), {})
 				return True
+			except Exception as e:
+				print(f"Error removing effect: {e}")
+				return False
+		
+		@dbus.service.method(INTERFACE_NAME, in_signature='s', out_signature='b')
+		def RemoveEffectByType(self, effect_type: str) -> bool:
+			"""Remove an effect from the chain by type.
+			
+			Args:
+				effect_type: Type of effect to remove ('blur', 'replace', 'brightness', etc.)
+			
+			Returns:
+				True if successful, False if effect not found
+			"""
+			try:
+				success = self.effect_controller.remove_effect_by_type(effect_type)
+				if success:
+					self.EffectChanged('remove', effect_type, {})
+				return success
 			except Exception as e:
 				print(f"Error removing effect: {e}")
 				return False

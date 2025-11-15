@@ -224,9 +224,52 @@ def add_effect(effect, **kwargs):
 		
 		success = control.AddEffect(effect, config)
 		if success:
-			print(f"Effect added to chain: {effect}")
+			print(f"Effect added/updated in chain: {effect}")
 		else:
 			print(f"Failed to add effect: {effect}")
+	except dbus.exceptions.DBusException as e:
+		print(f"Error connecting to camfx D-Bus service: {e}")
+		print("Make sure camfx is running with D-Bus support enabled (camfx start --dbus)")
+	except ImportError:
+		print("Error: D-Bus Python bindings not available. Install dbus-python or python-dbus.")
+	except Exception as e:
+		print(f"Error: {e}")
+
+
+@cli.command('remove-effect')
+@click.option('--index', type=int, help='Index of effect to remove (0-based)')
+@click.option('--effect', type=click.Choice(['blur', 'replace', 'brightness', 'beautify', 'autoframe', 'gaze-correct']), help='Type of effect to remove')
+def remove_effect(index, effect):
+	"""Remove effect from chain at runtime via D-Bus.
+	
+	Either --index or --effect must be provided.
+	"""
+	if index is None and effect is None:
+		print("Error: Either --index or --effect must be provided")
+		return
+	
+	if index is not None and effect is not None:
+		print("Error: Cannot specify both --index and --effect. Use one or the other.")
+		return
+	
+	try:
+		import dbus
+		bus = dbus.SessionBus()
+		service = bus.get_object('org.camfx.Control1', '/org/camfx/Control1')
+		control = dbus.Interface(service, 'org.camfx.Control1')
+		
+		if index is not None:
+			success = control.RemoveEffect(index)
+			if success:
+				print(f"Effect at index {index} removed from chain")
+			else:
+				print(f"Failed to remove effect at index {index}")
+		else:
+			success = control.RemoveEffectByType(effect)
+			if success:
+				print(f"Effect '{effect}' removed from chain")
+			else:
+				print(f"Effect '{effect}' not found in chain")
 	except dbus.exceptions.DBusException as e:
 		print(f"Error connecting to camfx D-Bus service: {e}")
 		print("Make sure camfx is running with D-Bus support enabled (camfx start --dbus)")
