@@ -213,3 +213,167 @@ class AutoFraming:
 			return frame
 
 
+class EyeGazeCorrection:
+	"""Correct eye gaze to appear as if looking directly at camera.
+	
+	Uses MediaPipe Face Mesh iris landmarks and affine transformation
+	to warp eye regions for natural-looking gaze correction.
+	"""
+	def __init__(self):
+		import mediapipe as mp
+		self.face_mesh = mp.solutions.face_mesh.FaceMesh(
+			max_num_faces=1,
+			refine_landmarks=True,  # Required for iris landmarks
+			min_detection_confidence=0.5,
+			min_tracking_confidence=0.5
+		)
+		# MediaPipe Face Mesh landmark indices
+		# Left eye landmarks (outer to inner)
+		self.LEFT_EYE_INDICES = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246]
+		# Right eye landmarks (outer to inner)
+		self.RIGHT_EYE_INDICES = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398]
+		# Iris centers (with refine_landmarks=True)
+		self.LEFT_IRIS_CENTER = 468
+		self.RIGHT_IRIS_CENTER = 473
+		# For smoothing between frames
+		self.last_left_iris_pos = None
+		self.last_right_iris_pos = None
+		self.smoothing_alpha = 0.3  # Exponential moving average factor
+	
+	def _get_eye_region(self, frame: np.ndarray, landmarks, eye_indices: list[int]) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+		"""Extract eye region from frame.
+		
+		Returns:
+			(eye_region, (x, y, width, height)) - Eye region and bounding box
+		"""
+		h, w = frame.shape[:2]
+		eye_points = np.array([
+			[int(landmarks.landmark[i].x * w), int(landmarks.landmark[i].y * h)]
+			for i in eye_indices
+		], dtype=np.int32)
+		
+		# Get bounding box with padding
+		x, y, w_eye, h_eye = cv2.boundingRect(eye_points)
+		padding = 10
+		x = max(0, x - padding)
+		y = max(0, y - padding)
+		w_eye = min(w - x, w_eye + 2 * padding)
+		h_eye = min(h - y, h_eye + 2 * padding)
+		
+		eye_region = frame[y:y + h_eye, x:x + w_eye].copy()
+		return eye_region, (x, y, w_eye, h_eye)
+	
+	def _get_eye_center(self, landmarks, eye_indices: list[int], frame_shape: tuple[int, int]) -> tuple[int, int]:
+		"""Calculate center of eye socket from landmarks."""
+		h, w = frame_shape[:2]
+		eye_points = np.array([
+			[landmarks.landmark[i].x * w, landmarks.landmark[i].y * h]
+			for i in eye_indices
+		])
+		center_x = int(np.mean(eye_points[:, 0]))
+		center_y = int(np.mean(eye_points[:, 1]))
+		return (center_x, center_y)
+	
+	def _warp_eye(self, eye_region: np.ndarray, iris_pos: tuple[int, int], eye_center: tuple[int, int], 
+	              bbox: tuple[int, int, int, int], strength: float) -> np.ndarray:
+		"""Warp eye region to center iris.
+		
+		Args:
+			eye_region: Eye region image
+			iris_pos: Iris position in full frame coordinates (x, y)
+			eye_center: Eye socket center in full frame coordinates (x, y)
+			bbox: Eye region bounding box (x, y, width, height)
+			strength: Correction strength (0.0-1.0)
+		"""
+		x, y, w_eye, h_eye = bbox
+		
+		# Convert to eye region coordinates
+		iris_x_local = iris_pos[0] - x
+		iris_y_local = iris_pos[1] - y
+		center_x_local = eye_center[0] - x
+		center_y_local = eye_center[1] - y
+		
+		# Calculate translation needed
+		dx = (center_x_local - iris_x_local) * strength
+		dy = (center_y_local - iris_y_local) * strength
+		
+		# Apply affine transformation
+		M = np.float32([[1, 0, dx], [0, 1, dy]])
+		warped = cv2.warpAffine(eye_region, M, (w_eye, h_eye), 
+		                        borderMode=cv2.BORDER_REPLICATE)
+		return warped
+	
+	def apply(self, frame: np.ndarray, mask: np.ndarray | None = None, strength: float = 0.5) -> np.ndarray:
+		"""
+		Args:
+			frame: Input frame (BGR format)
+			mask: Optional segmentation mask (unused, kept for API compatibility)
+			strength: Correction strength (0.0-1.0, higher = more correction)
+		"""
+		strength = np.clip(strength, 0.0, 1.0)
+		
+		# Convert to RGB for MediaPipe
+		frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+		results = self.face_mesh.process(frame_rgb)
+		
+		if not results.multi_face_landmarks:
+			# Reset smoothing state when face is lost
+			self.last_left_iris_pos = None
+			self.last_right_iris_pos = None
+			return frame
+		
+		face_landmarks = results.multi_face_landmarks[0]
+		h, w = frame.shape[:2]
+		result_frame = frame.copy()
+		
+		# Get iris positions
+		left_iris = face_landmarks.landmark[self.LEFT_IRIS_CENTER]
+		right_iris = face_landmarks.landmark[self.RIGHT_IRIS_CENTER]
+		left_iris_pos_raw = (int(left_iris.x * w), int(left_iris.y * h))
+		right_iris_pos_raw = (int(right_iris.x * w), int(right_iris.y * h))
+		
+		# Smooth iris positions to reduce jitter
+		if self.last_left_iris_pos is not None:
+			left_iris_pos = (
+				int(self.smoothing_alpha * left_iris_pos_raw[0] + (1 - self.smoothing_alpha) * self.last_left_iris_pos[0]),
+				int(self.smoothing_alpha * left_iris_pos_raw[1] + (1 - self.smoothing_alpha) * self.last_left_iris_pos[1])
+			)
+			right_iris_pos = (
+				int(self.smoothing_alpha * right_iris_pos_raw[0] + (1 - self.smoothing_alpha) * self.last_right_iris_pos[0]),
+				int(self.smoothing_alpha * right_iris_pos_raw[1] + (1 - self.smoothing_alpha) * self.last_right_iris_pos[1])
+			)
+		else:
+			left_iris_pos = left_iris_pos_raw
+			right_iris_pos = right_iris_pos_raw
+		
+		# Update last positions
+		self.last_left_iris_pos = left_iris_pos
+		self.last_right_iris_pos = right_iris_pos
+		
+		# Get eye centers
+		left_eye_center = self._get_eye_center(face_landmarks, self.LEFT_EYE_INDICES, (h, w))
+		right_eye_center = self._get_eye_center(face_landmarks, self.RIGHT_EYE_INDICES, (h, w))
+		
+		# Process left eye
+		try:
+			left_eye_region, left_bbox = self._get_eye_region(frame, face_landmarks, self.LEFT_EYE_INDICES)
+			if left_eye_region.size > 0:
+				left_warped = self._warp_eye(left_eye_region, left_iris_pos, left_eye_center, left_bbox, strength)
+				x, y, w_eye, h_eye = left_bbox
+				result_frame[y:y + h_eye, x:x + w_eye] = left_warped
+		except Exception:
+			pass  # Skip if eye region extraction fails
+		
+		# Process right eye
+		try:
+			right_eye_region, right_bbox = self._get_eye_region(frame, face_landmarks, self.RIGHT_EYE_INDICES)
+			if right_eye_region.size > 0:
+				right_warped = self._warp_eye(right_eye_region, right_iris_pos, right_eye_center, right_bbox, strength)
+				x, y, w_eye, h_eye = right_bbox
+				result_frame[y:y + h_eye, x:x + w_eye] = right_warped
+		except Exception:
+			pass  # Skip if eye region extraction fails
+		
+		return result_frame
+
+

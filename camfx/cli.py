@@ -153,6 +153,39 @@ def autoframe(padding: float, min_zoom: float, max_zoom: float, input_index: int
 		raise click.ClickException(str(e))
 
 
+@cli.command('gaze-correct')
+@click.option('--strength', default=0.5, type=float, help='Correction strength (0.0-1.0, higher = more correction)')
+@click.option('--input', 'input_index', default=0, type=int, help='Camera index (e.g., 0)')
+@click.option('--preview', is_flag=True, default=False, help='Show a preview window')
+@click.option('--no-virtual', is_flag=True, default=False, help='Disable virtual camera output (preview only)')
+@click.option('--width', default=None, type=int, help='Input capture width')
+@click.option('--height', default=None, type=int, help='Input capture height')
+@click.option('--fps', default=30, type=int, help='Virtual camera FPS')
+@click.option('--name', default='camfx', type=str, help='Name for the virtual camera source')
+def gaze_correct(strength: float, input_index: int, preview: bool, no_virtual: bool, width: int | None, height: int | None, fps: int, name: str):
+	"""Correct eye gaze to appear as if looking directly at camera.
+	
+	Uses MediaPipe Face Mesh iris landmarks and affine transformation
+	to warp eye regions for natural-looking gaze correction.
+	Works best for small gaze deviations (< 15 degrees).
+	"""
+	if strength < 0.0 or strength > 1.0:
+		raise click.ClickException(f"Strength must be between 0.0 and 1.0, got {strength}")
+	
+	from .core import VideoEnhancer
+	enhancer = VideoEnhancer(
+		input_index,
+		effect_type='gaze-correct',
+		config={'width': width, 'height': height, 'fps': fps, 'enable_virtual': (not no_virtual), 'camera_name': name},
+	)
+	try:
+		enhancer.run(preview=preview, strength=strength)
+	except KeyboardInterrupt:
+		print("Stopped")
+	except ValueError as e:
+		raise click.ClickException(str(e))
+
+
 @cli.command('list-devices')
 def list_devices():
 	"""List available camera device nodes and names via sysfs (non-blocking)."""

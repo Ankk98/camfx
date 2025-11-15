@@ -1,7 +1,7 @@
 import cv2
 
 from .segmentation import PersonSegmenter
-from .effects import BackgroundBlur, BackgroundReplace, BrightnessAdjustment, FaceBeautification, AutoFraming
+from .effects import BackgroundBlur, BackgroundReplace, BrightnessAdjustment, FaceBeautification, AutoFraming, EyeGazeCorrection
 from .output_pipewire import PipeWireOutput
 
 
@@ -72,6 +72,8 @@ class VideoEnhancer:
 			return FaceBeautification()
 		elif effect_type == 'autoframe':
 			return AutoFraming()
+		elif effect_type == 'gaze-correct':
+			return EyeGazeCorrection()
 		raise ValueError(f"Unknown effect_type: {effect_type}")
 
 	def run(self, preview: bool = False, **kwargs) -> None:

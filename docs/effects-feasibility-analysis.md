@@ -79,46 +79,71 @@ if results.multi_face_landmarks:
 
 ---
 
-## 3. Eye Gaze Correction ⚠️ **PARTIALLY FEASIBLE - Complex**
+## 3. Eye Gaze Correction ✅ **FEASIBLE - Medium Complexity**
 
-### Feasibility: ⚠️ **Medium-High (with limitations)**
+### Feasibility: ✅ **High (Updated after research)**
 - **Dependencies Required**: MediaPipe Face Mesh (already included), OpenCV
-- **Complexity**: High
-- **Performance Impact**: High (requires per-frame warping)
+- **Optional**: scikit-image (for better warping quality)
+- **Complexity**: Medium
+- **Performance Impact**: Moderate (~20-30ms per frame)
 
 ### Implementation Approach
-- Use MediaPipe Face Mesh to detect iris landmarks (left/right iris centers)
-- Calculate gaze direction from iris position
-- Warp eye region to simulate looking at camera
-- This requires sophisticated image warping techniques
+- Use MediaPipe Face Mesh with `refine_landmarks=True` to get iris landmarks
+- Calculate iris position relative to eye socket center
+- Apply affine transformation or thin-plate spline warping to eye region
+- Blend warped eyes back into frame
 
 ### MediaPipe Capabilities
-- ✅ Face Mesh provides iris landmarks (left/right iris centers)
-- ✅ Can detect iris position relative to eye socket
-- ⚠️ Does NOT directly provide gaze direction estimation
-- ⚠️ Eye warping requires advanced image transformation
+- ✅ Face Mesh with `refine_landmarks=True` provides iris landmarks
+- ✅ Left iris center: landmark 468
+- ✅ Right iris center: landmark 473
+- ✅ Iris connections available via `FACEMESH_IRISES`
+- ✅ Can calculate gaze direction from iris position relative to eye socket
 
-### Challenges
-1. **Gaze Direction Estimation**: Need to determine where eyes are looking
-   - Requires understanding of eye geometry
-   - May need additional ML model or heuristics
+### Implementation Options
+
+**Option 1: Simple Affine Warping (Recommended for MVP)**
+- Use OpenCV's `cv2.warpAffine()` for eye region warping
+- Fast (~20-30ms per frame)
+- Good quality for small gaze deviations (< 15 degrees)
+- Uses existing dependencies only
+
+**Option 2: Thin-Plate Spline (Better Quality)**
+- Requires `scikit-image` library (`pip install scikit-image`)
+- More natural-looking results
+- Better for larger gaze angles
+- Slightly slower (~30-50ms per frame)
+
+### Open-Source Reference
+- **GitHub Project**: `arnaudlvq/Eye-Contact-RealTime-Detection`
+- Uses MediaPipe + OpenCV (same as our stack)
+- Provides reference implementation for detection logic
+- Can be adapted for correction (not just detection)
+
+### Implementation Steps
+1. **Phase 1**: Eye contact detection (1-2 days)
+   - Detect if user is looking at camera
+   - Provide feedback
    
-2. **Natural Eye Warping**: Making warped eyes look natural
-   - Requires careful blending
-   - Must preserve eye shape and texture
-   - Avoid artifacts
-
-3. **Performance**: Real-time warping is computationally expensive
-
-### Simple Alternative
-- **"Eye Contact" effect**: Subtle adjustment to make eyes appear more centered
-- Less aggressive than full gaze correction
-- More feasible for real-time performance
+2. **Phase 2**: Simple warping (3-5 days)
+   - Implement affine transformation warping
+   - Handle left/right eyes separately
+   - Add smooth blending
+   
+3. **Phase 3**: Refinement (2-3 days)
+   - Improve quality
+   - Handle edge cases (blinking, extreme angles)
+   - Optimize performance
 
 ### Notes
-- Full gaze correction is complex and may require additional libraries
-- Simpler "eye contact enhancement" is more feasible
-- Consider this a Phase 2+ feature
+- ✅ **Feasible with existing dependencies** (MediaPipe + OpenCV)
+- ✅ Reference implementation available on GitHub
+- ✅ Can start with simple approach, upgrade to better quality later
+- ⚠️ Requires careful implementation to avoid artifacts
+- ⚠️ Best results for small gaze deviations initially
+- **Recommendation**: Implement as Phase 2 feature after current effects are stable
+
+**See**: `docs/eye-gaze-correction-research.md` for detailed research and implementation guide
 
 ---
 
@@ -190,10 +215,11 @@ if results.detections:
 ### Near-Term Implementation (Phase 2)
 3. ✅ **Face Beautification** - Medium complexity, uses MediaPipe Face Mesh
    - Note: Face Mesh is heavier, may impact performance
-
-### Future Consideration (Phase 3+)
-4. ⚠️ **Eye Gaze Correction** - Complex, requires advanced warping
-   - Consider simpler "eye contact enhancement" variant first
+4. ✅ **Eye Gaze Correction** - Feasible with existing dependencies
+   - MediaPipe Face Mesh provides iris landmarks
+   - Can use OpenCV for simple warping
+   - Optional: scikit-image for better quality
+   - Reference implementation available on GitHub
 
 ---
 
