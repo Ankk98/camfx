@@ -1,7 +1,7 @@
 import cv2
 
 from .segmentation import PersonSegmenter
-from .effects import BackgroundBlur, BackgroundReplace
+from .effects import BackgroundBlur, BackgroundReplace, BrightnessAdjustment, FaceBeautification, AutoFraming
 from .output_pipewire import PipeWireOutput
 
 
@@ -14,9 +14,15 @@ class VideoEnhancer:
 				f"Unable to open input camera device index {input_device}. Use 'camfx list-devices' to discover working indexes."
 			)
 		print("Camera opened successfully")
-		print("Initializing segmentation model...")
-		self.segmenter = PersonSegmenter()
-		print("Segmentation model ready")
+		# Only initialize segmentation for effects that need it
+		# Note: brightness may need it if face_only=True, but we'll handle that in run()
+		effects_needing_mask = {'blur', 'replace'}
+		if effect_type in effects_needing_mask:
+			print("Initializing segmentation model...")
+			self.segmenter = PersonSegmenter()
+			print("Segmentation model ready")
+		else:
+			self.segmenter = None
 		self.effect = self._create_effect(effect_type)
 		print(f"Effect '{effect_type}' created")
 		self.target_fps = int((config or {}).get('fps', 30))
@@ -60,6 +66,12 @@ class VideoEnhancer:
 			return BackgroundBlur()
 		elif effect_type == 'replace':
 			return BackgroundReplace()
+		elif effect_type == 'brightness':
+			return BrightnessAdjustment()
+		elif effect_type == 'beautify':
+			return FaceBeautification()
+		elif effect_type == 'autoframe':
+			return AutoFraming()
 		raise ValueError(f"Unknown effect_type: {effect_type}")
 
 	def run(self, preview: bool = False, **kwargs) -> None:
@@ -76,7 +88,17 @@ class VideoEnhancer:
 					print("Failed to read frame from camera")
 					break
 
-				mask = self.segmenter.get_mask(frame)
+				# Get mask only if needed
+				# For brightness with face_only, we need segmentation
+				needs_mask = (self.segmenter is not None) or (
+					self.effect.__class__.__name__ == 'BrightnessAdjustment' and kwargs.get('face_only', False)
+				)
+				if needs_mask and self.segmenter is None:
+					# Lazy initialization for brightness with face_only
+					print("Initializing segmentation model for face-only brightness...")
+					self.segmenter = PersonSegmenter()
+					print("Segmentation model ready")
+				mask = self.segmenter.get_mask(frame) if needs_mask else None
 				processed = self.effect.apply(frame, mask, **kwargs)
 
 				if self.virtual_cam is not None:
