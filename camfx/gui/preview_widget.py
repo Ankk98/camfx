@@ -52,8 +52,8 @@ class PreviewWidget(Gtk.Box):
 		self.picture.set_css_classes(["preview-picture"])
 		self.append(self.picture)
 		
-		# Status label
-		self.status_label = Gtk.Label(label="Status: Not connected")
+		# Preview status label
+		self.status_label = Gtk.Label(label="Preview: Not connected")
 		self.status_label.set_margin_top(5)
 		self.append(self.status_label)
 		
@@ -102,22 +102,22 @@ class PreviewWidget(Gtk.Box):
 				logger.info(f"Connecting to PipeWire source '{self.source_name}'")
 				self.pipewire_input = PipeWireInput(source_name=self.source_name)
 				logger.info("Successfully connected to PipeWire source")
-				GLib.idle_add(self._update_status, "Status: Connected")
+				GLib.idle_add(self._update_status, "Preview: Connected")
 			except RuntimeError as e:
 				logger.error(f"RuntimeError connecting to PipeWire source: {e}")
-				error_msg = f"Status: {str(e)}"
+				error_msg = f"Preview: {str(e)}"
 				GLib.idle_add(self._update_status, error_msg)
 				self.running = False
 				return
 			except Exception as e:
 				logger.error(f"Exception connecting to PipeWire source: {e}", exc_info=True)
-				error_msg = f"Status: Error - {str(e)}"
+				error_msg = f"Preview: Error - {str(e)}"
 				GLib.idle_add(self._update_status, error_msg)
 				self.running = False
 				return
 		else:
 			logger.error("PipeWire not available")
-			GLib.idle_add(self._update_status, "Status: PipeWire not available")
+			GLib.idle_add(self._update_status, "Preview: PipeWire not available")
 			self.running = False
 			return
 		

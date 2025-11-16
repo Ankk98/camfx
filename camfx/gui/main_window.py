@@ -106,9 +106,9 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 		
 		preview_box.append(camera_control_box)
 		
-		# Connection status
+		# D-Bus connection status
 		if self.connected:
-			self.status_label = Gtk.Label(label="Status: Connected")
+			self.status_label = Gtk.Label(label="D-Bus: Connected")
 			self.status_label.add_css_class("success")
 			# Get initial camera state
 			try:
@@ -118,7 +118,7 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 			except Exception:
 				pass
 		else:
-			self.status_label = Gtk.Label(label="Status: Not connected - Start camfx with --dbus")
+			self.status_label = Gtk.Label(label="D-Bus: Not connected - Start camfx with --dbus")
 			self.status_label.add_css_class("error")
 			self.camera_toggle.set_sensitive(False)
 		self.status_label.set_xalign(0)
