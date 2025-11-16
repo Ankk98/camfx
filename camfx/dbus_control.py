@@ -34,6 +34,7 @@ if DBUS_AVAILABLE:
 			dbus.service.Object.__init__(self, bus_name, object_path)
 			self.service = service
 			self.effect_controller = service.effect_controller
+			self.video_enhancer = service.video_enhancer
 		
 		@dbus.service.method(INTERFACE_NAME, in_signature='sa{sv}', out_signature='b')
 		def SetEffect(self, effect_type: str, config: Dict[str, Any]) -> bool:
@@ -211,6 +212,55 @@ if DBUS_AVAILABLE:
 			"""
 			pass
 		
+		@dbus.service.method(INTERFACE_NAME, out_signature='b')
+		def StartCamera(self) -> bool:
+			"""Start the camera.
+			
+			Returns:
+				True if successful, False otherwise
+			"""
+			try:
+				if self.video_enhancer:
+					self.video_enhancer._start_camera()
+					self.CameraStateChanged(True)
+					return True
+				return False
+			except Exception as e:
+				print(f"Error starting camera: {e}")
+				return False
+		
+		@dbus.service.method(INTERFACE_NAME, out_signature='b')
+		def StopCamera(self) -> bool:
+			"""Stop the camera.
+			
+			Returns:
+				True if successful, False otherwise
+			"""
+			try:
+				if self.video_enhancer:
+					self.video_enhancer._stop_camera()
+					self.CameraStateChanged(False)
+					return True
+				return False
+			except Exception as e:
+				print(f"Error stopping camera: {e}")
+				return False
+		
+		@dbus.service.method(INTERFACE_NAME, out_signature='b')
+		def GetCameraState(self) -> bool:
+			"""Get current camera state.
+			
+			Returns:
+				True if camera is active, False otherwise
+			"""
+			try:
+				if self.video_enhancer:
+					return self.video_enhancer.camera_active
+				return False
+			except Exception as e:
+				print(f"Error getting camera state: {e}")
+				return False
+		
 		@dbus.service.signal(INTERFACE_NAME, signature='b')
 		def CameraStateChanged(self, is_active: bool):
 			"""Signal emitted when camera state changes.
@@ -224,11 +274,12 @@ if DBUS_AVAILABLE:
 class CamfxControlService:
 	"""D-Bus service for controlling camfx effects at runtime."""
 	
-	def __init__(self, effect_controller):
+	def __init__(self, effect_controller, video_enhancer=None):
 		"""Initialize D-Bus service.
 		
 		Args:
 			effect_controller: EffectController instance to control
+			video_enhancer: VideoEnhancer instance to control camera (optional)
 		"""
 		if not DBUS_AVAILABLE:
 			error_msg = "D-Bus Python bindings not available. Install dbus-python or python-dbus."
@@ -237,6 +288,7 @@ class CamfxControlService:
 			raise RuntimeError(error_msg)
 		
 		self.effect_controller = effect_controller
+		self.video_enhancer = video_enhancer
 		self.main_loop: Optional[GLib.MainLoop] = None
 		self.loop_thread: Optional[threading.Thread] = None
 		self.service_object: Optional[object] = None

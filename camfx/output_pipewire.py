@@ -1,5 +1,6 @@
 """PipeWire virtual camera output using GStreamer via PyGObject."""
 
+import logging
 import os
 import subprocess
 import sys
@@ -10,6 +11,8 @@ import gi
 
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst
+
+logger = logging.getLogger('camfx.output_pipewire')
 
 
 class PipeWireOutput:
@@ -253,11 +256,13 @@ class PipeWireOutput:
 			RuntimeError: If buffer push fails
 		"""
 		if self.appsrc is None or self.pipeline is None:
+			logger.error("PipeWire output not initialized (appsrc or pipeline is None)")
 			raise RuntimeError("PipeWire output not initialized")
 
 		size = len(frame_rgb)
 		expected_size = self.width * self.height * 3
 		if size != expected_size:
+			logger.error(f"Frame size mismatch: expected {expected_size} bytes, got {size}")
 			raise ValueError(
 				f"Frame size mismatch: expected {expected_size} bytes, got {size}"
 			)
@@ -265,6 +270,7 @@ class PipeWireOutput:
 		# Create GStreamer buffer
 		buffer = Gst.Buffer.new_allocate(None, size, None)
 		if buffer is None:
+			logger.error("Failed to allocate GStreamer buffer")
 			raise RuntimeError("Failed to allocate GStreamer buffer")
 
 		buffer.fill(0, frame_rgb)
@@ -275,10 +281,13 @@ class PipeWireOutput:
 		ret = self.appsrc.emit('push-buffer', buffer)
 		if ret != Gst.FlowReturn.OK:
 			if ret == Gst.FlowReturn.FLUSHING:
+				logger.error("Pipeline is flushing, cannot push buffer")
 				raise RuntimeError("Pipeline is flushing, cannot push buffer")
 			elif ret == Gst.FlowReturn.EOS:
+				logger.error("Pipeline reached end of stream")
 				raise RuntimeError("Pipeline reached end of stream")
 			else:
+				logger.error(f"Failed to push buffer: {ret}")
 				raise RuntimeError(f"Failed to push buffer: {ret}")
 
 	def sleep_until_next_frame(self) -> None:

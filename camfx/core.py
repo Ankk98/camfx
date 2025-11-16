@@ -1,3 +1,4 @@
+import logging
 import cv2
 import numpy as np
 import time
@@ -7,18 +8,17 @@ from .segmentation import PersonSegmenter
 from .output_pipewire import PipeWireOutput
 from .control import EffectController
 
+logger = logging.getLogger('camfx.core')
+
 
 class VideoEnhancer:
-	def __init__(self, input_device: int = 0, effect_type: str = 'blur', config: dict | None = None, 
-	             enable_lazy_camera: bool = False) -> None:
+	def __init__(self, input_device: int = 0, effect_type: str = 'blur', config: dict | None = None) -> None:
 		self.input_device = input_device
 		self.config = config or {}
-		self.enable_lazy_camera = enable_lazy_camera
 		
-		# Camera is not opened immediately if lazy mode is enabled
+		# Camera is not opened immediately - requires explicit start via D-Bus or CLI
 		self.cap: Optional[cv2.VideoCapture] = None
 		self.camera_active = False
-		self.should_use_lazy = False  # Will be set based on enable_lazy_camera and enable_virtual
 		
 		# Initialize effect controller
 		self.effect_controller = EffectController()
@@ -37,73 +37,12 @@ class VideoEnhancer:
 		self.enable_virtual = bool(self.config.get('enable_virtual', True))
 		camera_name = self.config.get('camera_name', 'camfx')
 		
-		# For lazy camera, we need to know dimensions before opening camera
-		# Use config values or defaults
+		# Use config dimensions or defaults
 		target_width = self.config.get('width')
 		target_height = self.config.get('height')
-		
-		# When virtual camera is enabled, always use lazy camera behavior to save resources
-		# and respect privacy (camera only activates when source is being consumed)
-		# When virtual camera is disabled (preview only), respect the lazy_camera flag
-		self.should_use_lazy = enable_lazy_camera or self.enable_virtual
-		
-		if not self.should_use_lazy:
-			# Preview-only mode without lazy camera: open camera immediately
-			print(f"Opening camera device {input_device}...")
-			self.cap = cv2.VideoCapture(input_device)
-			if not self.cap.isOpened():
-				# Check if camera is in use by another process
-				import subprocess
-				try:
-					result = subprocess.run(
-						['lsof', f'/dev/video{input_device}'],
-						capture_output=True,
-						text=True,
-						timeout=1
-					)
-					if result.returncode == 0 and result.stdout.strip():
-						# Camera is in use
-						lines = result.stdout.strip().split('\n')
-						if len(lines) > 1:  # Header + at least one process
-							processes = []
-							for line in lines[1:]:
-								parts = line.split()
-								if len(parts) >= 2:
-									processes.append(f"{parts[0]} (PID {parts[1]})")
-							process_list = ", ".join(processes)
-							raise RuntimeError(
-								f"Unable to open camera device {input_device}. "
-								f"Camera is already in use by: {process_list}. "
-								f"Close the other process or use a different camera index."
-							)
-				except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
-					pass  # lsof not available or failed, use generic message
-				
-				raise RuntimeError(
-					f"Unable to open input camera device index {input_device}. "
-					f"Use 'camfx list-devices' to discover working indexes. "
-					f"If the camera is in use by another process, close it first."
-				)
-			print("Camera opened successfully")
-			
-			# Set dimensions if specified
-			if target_width:
-				self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(target_width))
-			if target_height:
-				self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(target_height))
-			
-			# Get actual dimensions
-			self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-			self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-			self.camera_active = True
-		else:
-			# For lazy camera, use config dimensions or defaults
-			self.width = target_width or 640
-			self.height = target_height or 480
-			if self.enable_virtual:
-				print(f"Camera will start automatically when virtual source is in use.")
-			else:
-				print(f"Lazy camera mode enabled. Camera will start when source is in use.")
+		self.width = target_width or 640
+		self.height = target_height or 480
+		print("Camera is off by default. Use D-Bus or CLI to start it.")
 		
 		# Virtual camera output via PipeWire (always initialize, even if camera not active)
 		self.virtual_cam = None
@@ -125,20 +64,12 @@ class VideoEnhancer:
 				print("  3. Or use --no-virtual to skip virtual camera initialization")
 				self.virtual_cam = None
 		
-		# Initialize source monitor when virtual camera is enabled and lazy behavior is used
-		# This ensures camera only activates when source is being consumed
-		self.source_monitor = None
-		if self.should_use_lazy and self.enable_virtual:
-			from .pipewire_monitor import PipeWireSourceMonitor
-			self.source_monitor = PipeWireSourceMonitor(camera_name)
-			self.source_monitor.start_monitoring(self._on_source_usage_changed)
-		
 		# Initialize D-Bus service if enabled
 		self.dbus_service = None
 		if self.config.get('enable_dbus', False):
 			try:
 				from .dbus_control import CamfxControlService
-				self.dbus_service = CamfxControlService(self.effect_controller)
+				self.dbus_service = CamfxControlService(self.effect_controller, self)
 				self.dbus_service.start()
 			except Exception as exc:
 				print(f"Warning: Failed to start D-Bus service: {exc}")
@@ -171,28 +102,21 @@ class VideoEnhancer:
 		# (for future extensibility)
 		return effect_config
 	
-	def _on_source_usage_changed(self, is_used: bool):
-		"""Callback when source usage changes."""
-		if is_used and not self.camera_active:
-			self._start_camera()
-		elif not is_used and self.camera_active:
-			self._stop_camera()
-	
 	def _start_camera(self):
 		"""Start camera capture."""
 		if self.cap is not None:
 			return  # Already started
 		
-		print(f"Starting camera (source is in use)...")
 		self.cap = cv2.VideoCapture(self.input_device)
 		if not self.cap.isOpened():
-			print(f"Warning: Failed to open camera {self.input_device}")
+			self.cap = None
+			self.camera_active = False
 			return
 		
 		# Set resolution if specified
-		if 'width' in self.config:
+		if 'width' in self.config and self.config['width'] is not None:
 			self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(self.config['width']))
-		if 'height' in self.config:
+		if 'height' in self.config and self.config['height'] is not None:
 			self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(self.config['height']))
 		
 		# Update dimensions from actual camera
@@ -200,18 +124,16 @@ class VideoEnhancer:
 		self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 		
 		self.camera_active = True
-		print("Camera started")
 	
 	def _stop_camera(self):
 		"""Stop camera capture."""
 		if self.cap is None:
+			self.camera_active = False
 			return
 		
-		print("Stopping camera (source not in use)...")
 		self.cap.release()
 		self.cap = None
 		self.camera_active = False
-		print("Camera stopped")
 	
 	def set_effect(self, effect_type: str, config: dict):
 		"""Change effect at runtime."""
@@ -226,33 +148,32 @@ class VideoEnhancer:
 		print(f"Effect added to chain: {effect_type}")
 
 	def run(self, preview: bool = False, **kwargs) -> None:
-		"""Main processing loop with lazy camera support."""
+		"""Main processing loop."""
 		try:
 			if preview:
 				cv2.namedWindow('camfx preview', cv2.WINDOW_NORMAL)
 				print("Preview window created. Press 'q' to quit.")
 			
-			# If lazy camera is not being used, camera should already be started
-			# (only happens in preview-only mode without lazy camera)
-			if not self.should_use_lazy and not self.camera_active:
-				self._start_camera()
-			
+			# Camera is not auto-started - must be started explicitly via D-Bus or CLI
 			frame_count = 0
+			last_log_time = time.time()
+			
 			while True:
-				# Check if camera should be active (for lazy camera mode)
-				if self.should_use_lazy and not self.camera_active:
-					# Send a black frame or last frame when camera is off
+				# Check if camera is active
+				if not self.camera_active:
+					# Send a black frame when camera is off
 					if self.virtual_cam is not None:
-						# Send black frame
 						black_frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
 						frame_rgb = cv2.cvtColor(black_frame, cv2.COLOR_BGR2RGB)
-						self.virtual_cam.send(frame_rgb.tobytes())
-						self.virtual_cam.sleep_until_next_frame()
+						try:
+							self.virtual_cam.send(frame_rgb.tobytes())
+							self.virtual_cam.sleep_until_next_frame()
+						except Exception as e:
+							logger.error(f"Error sending black frame to virtual camera: {e}", exc_info=True)
 					
 					if preview:
-						# Show message in preview
 						display_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-						cv2.putText(display_frame, "Camera inactive (source not in use)", 
+						cv2.putText(display_frame, "Camera inactive (explicitly off)", 
 						           (10, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 						cv2.imshow('camfx preview', display_frame)
 						key = cv2.waitKey(1) & 0xFF
@@ -264,12 +185,12 @@ class VideoEnhancer:
 				
 				# Camera is active, process frames
 				if self.cap is None:
+					self.camera_active = False
 					time.sleep(0.1)
 					continue
 				
 				ret, frame = self.cap.read()
-				if not ret:
-					print("Failed to read frame from camera")
+				if not ret or frame is None:
 					time.sleep(0.1)
 					continue
 				
@@ -284,17 +205,13 @@ class VideoEnhancer:
 						needs_mask = True
 						break
 					elif effect_class_name == 'BrightnessAdjustment':
-						# Check if brightness effect needs mask (face_only mode)
-						# We'll check this in the effect chain apply method
 						if kwargs.get('face_only', False):
 							needs_mask = True
 							break
 				
 				# Initialize segmenter if needed
 				if needs_mask and self.segmenter is None:
-					print("Initializing segmentation model...")
 					self.segmenter = PersonSegmenter()
-					print("Segmentation model ready")
 				
 				# Get mask if needed
 				mask = self.segmenter.get_mask(frame) if needs_mask else None
@@ -304,9 +221,12 @@ class VideoEnhancer:
 				
 				# Send to virtual camera
 				if self.virtual_cam is not None:
-					frame_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
-					self.virtual_cam.send(frame_rgb.tobytes())
-					self.virtual_cam.sleep_until_next_frame()
+					try:
+						frame_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
+						self.virtual_cam.send(frame_rgb.tobytes())
+						self.virtual_cam.sleep_until_next_frame()
+					except Exception as e:
+						logger.error(f"Error sending frame to virtual camera: {e}", exc_info=True)
 				
 				# Show preview
 				if preview:
@@ -321,8 +241,6 @@ class VideoEnhancer:
 		
 		finally:
 			self._stop_camera()
-			if self.source_monitor:
-				self.source_monitor.stop_monitoring()
 			if self.dbus_service:
 				self.dbus_service.stop()
 			if self.virtual_cam is not None:

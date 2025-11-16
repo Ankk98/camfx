@@ -190,4 +190,37 @@ class CamfxDBusClient:
 			return self.control.UpdateEffectParameter(effect_type, parameter, dbus_value)
 		except dbus.exceptions.DBusException as e:
 			raise ConnectionError(f"D-Bus error: {e}")
+	
+	def start_camera(self) -> bool:
+		"""Start the camera.
+		
+		Returns:
+			True if successful, False otherwise
+		"""
+		try:
+			return self.control.StartCamera()
+		except dbus.exceptions.DBusException as e:
+			raise ConnectionError(f"D-Bus error: {e}")
+	
+	def stop_camera(self) -> bool:
+		"""Stop the camera.
+		
+		Returns:
+			True if successful, False otherwise
+		"""
+		try:
+			return self.control.StopCamera()
+		except dbus.exceptions.DBusException as e:
+			raise ConnectionError(f"D-Bus error: {e}")
+	
+	def get_camera_state(self) -> bool:
+		"""Get current camera state.
+		
+		Returns:
+			True if camera is active, False otherwise
+		"""
+		try:
+			return self.control.GetCameraState()
+		except dbus.exceptions.DBusException as e:
+			raise ConnectionError(f"D-Bus error: {e}")
 

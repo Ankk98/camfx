@@ -1,12 +1,15 @@
 """Simple CLI for camfx."""
 
 import glob
+import logging
 import os
 import sys
 
 import click
 
 from .core import VideoEnhancer
+
+logger = logging.getLogger('camfx.cli')
 
 
 @click.group()
@@ -21,8 +24,7 @@ def cli():
 @click.option('--height', default=None, type=int, help='Input capture height')
 @click.option('--fps', default=30, type=int, help='Virtual camera FPS')
 @click.option('--name', default='camfx', type=str, help='Name for the virtual camera source')
-@click.option('--lazy-camera', is_flag=True, default=False, help='Only use camera when virtual source is actively consumed')
-@click.option('--dbus', is_flag=True, default=False, help='Enable D-Bus service for runtime effect control')
+@click.option('--dbus', is_flag=True, default=False, help='Enable D-Bus service for runtime effect and camera control (REQUIRED for camera toggle)')
 @click.option('--effect', type=click.Choice(['blur', 'replace', 'brightness', 'beautify', 'autoframe', 'gaze-correct']), help='Initial effect to apply')
 @click.option('--strength', type=int, help='For blur effect (must be odd)')
 @click.option('--brightness', type=int, help='For brightness effect (-100 to 100)')
@@ -32,8 +34,13 @@ def cli():
 @click.option('--min-zoom', type=float, help='For autoframe effect')
 @click.option('--max-zoom', type=float, help='For autoframe effect')
 def start(input_index: int, width: int | None, height: int | None, fps: int, name: str, 
-         lazy_camera: bool, dbus: bool, effect: str | None, **kwargs):
-	"""Start virtual camera with optional initial effect.
+         dbus: bool, effect: str | None, **kwargs):
+	"""Start camfx daemon (virtual camera service).
+	
+	The camera is OFF by default. Use D-Bus or CLI commands to control it:
+	- camfx camera-start: Start the camera
+	- camfx camera-stop: Stop the camera
+	- camfx camera-status: Check camera status
 	
 	Use D-Bus commands (set-effect, add-effect) to change effects at runtime.
 	"""
@@ -56,7 +63,6 @@ def start(input_index: int, width: int | None, height: int | None, fps: int, nam
 			'enable_dbus': dbus,
 			**initial_config,
 		},
-		enable_lazy_camera=lazy_camera,
 	)
 	
 	try:
@@ -83,44 +89,71 @@ def preview(name: str, input_index: int, effect: str | None, **kwargs):
 	Otherwise, falls back to previewing camera directly with optional effect.
 	"""
 	import cv2
+	import time
+	
+	logger.info(f"Starting preview command: name={name}, input_index={input_index}, effect={effect}")
 	
 	# Try to connect to PipeWire virtual camera first
 	try:
+		logger.debug(f"Attempting to connect to PipeWire source '{name}'")
 		from .input_pipewire import PipeWireInput
 		pw_input = PipeWireInput(source_name=name)
+		logger.info(f"Successfully connected to PipeWire source '{name}'")
 		print(f"Previewing output from '{name}' virtual camera")
 		print("Press 'q' to quit.")
 		
 		cv2.namedWindow('camfx preview', cv2.WINDOW_NORMAL)
+		logger.debug("Created OpenCV preview window")
 		
 		try:
 			frame_count = 0
 			no_frame_count = 0
+			last_log_time = time.time()
+			logger.info("Entering preview loop")
+			
 			while True:
 				ret, frame = pw_input.read()
 				if ret and frame is not None:
+					logger.debug(f"Received frame: shape={frame.shape}, dtype={frame.dtype}")
 					cv2.imshow('camfx preview', frame)
 					frame_count += 1
 					no_frame_count = 0
+					
 					if frame_count == 1:
+						logger.info("First frame received from virtual camera")
 						print("Receiving frames from virtual camera...")
+					
+					# Log FPS every 5 seconds
+					current_time = time.time()
+					if current_time - last_log_time >= 5.0:
+						fps = frame_count / (current_time - last_log_time + 0.001)
+						logger.info(f"Preview FPS: {fps:.2f} (total frames: {frame_count})")
+						frame_count = 0
+						last_log_time = current_time
 				else:
 					# No frame available, wait a bit
 					no_frame_count += 1
+					if no_frame_count == 1:
+						logger.debug("No frame available, waiting...")
 					if no_frame_count == 100:  # ~1 second at 10ms intervals
+						logger.warning("No frames received for ~1 second. Is camfx start running?")
 						print("Warning: No frames received. Is camfx start running?")
-					import time
 					time.sleep(0.01)
 				
 				key = cv2.waitKey(1) & 0xFF
 				if key == ord('q'):
+					logger.info("User pressed 'q', exiting preview")
 					break
 		finally:
+			logger.info("Cleaning up preview resources")
 			pw_input.release()
 			cv2.destroyAllWindows()
+			logger.debug("Preview cleanup complete")
 		
 	except RuntimeError as e:
 		# Virtual camera not found, fall back to direct camera preview
+		logger.warning(f"Virtual camera '{name}' not found: {e}")
+		logger.info("Falling back to direct camera preview")
 		print(f"Virtual camera '{name}' not found: {e}")
 		print("Falling back to direct camera preview...")
 		
@@ -131,6 +164,7 @@ def preview(name: str, input_index: int, effect: str | None, **kwargs):
 				if value is not None:
 					effect_config[key] = value
 		
+		logger.debug(f"Effect config: {effect_config}")
 		enhancer = VideoEnhancer(
 			input_index,
 			effect_type=effect or None,
@@ -138,13 +172,17 @@ def preview(name: str, input_index: int, effect: str | None, **kwargs):
 				'enable_virtual': False,
 				**effect_config,
 			},
-			enable_lazy_camera=False,
 		)
 		
 		try:
+			logger.info("Starting VideoEnhancer with preview=True")
 			enhancer.run(preview=True, **effect_config)
 		except KeyboardInterrupt:
+			logger.info("Preview interrupted by user")
 			print("Stopped")
+		except Exception as e:
+			logger.error(f"Error in preview fallback: {e}", exc_info=True)
+			raise
 
 
 @cli.command('list-devices')
@@ -297,6 +335,75 @@ def get_effects():
 			for i, (effect_type, class_name, config) in enumerate(effects):
 				config_str = ", ".join(f"{k}={v}" for k, v in config.items())
 				print(f"  {i}: {effect_type} ({class_name}) - {config_str}")
+	except dbus.exceptions.DBusException as e:
+		print(f"Error connecting to camfx D-Bus service: {e}")
+		print("Make sure camfx is running with D-Bus support enabled (camfx start --dbus)")
+	except ImportError:
+		print("Error: D-Bus Python bindings not available. Install dbus-python or python-dbus.")
+	except Exception as e:
+		print(f"Error: {e}")
+
+
+@cli.command('camera-start')
+def camera_start():
+	"""Start the camera via D-Bus."""
+	try:
+		import dbus
+		bus = dbus.SessionBus()
+		service = bus.get_object('org.camfx.Control1', '/org/camfx/Control1')
+		control = dbus.Interface(service, 'org.camfx.Control1')
+		
+		success = control.StartCamera()
+		if success:
+			print("Camera started")
+		else:
+			print("Failed to start camera")
+	except dbus.exceptions.DBusException as e:
+		print(f"Error connecting to camfx D-Bus service: {e}")
+		print("Make sure camfx is running with D-Bus support enabled (camfx start --dbus)")
+	except ImportError:
+		print("Error: D-Bus Python bindings not available. Install dbus-python or python-dbus.")
+	except Exception as e:
+		print(f"Error: {e}")
+
+
+@cli.command('camera-stop')
+def camera_stop():
+	"""Stop the camera via D-Bus."""
+	try:
+		import dbus
+		bus = dbus.SessionBus()
+		service = bus.get_object('org.camfx.Control1', '/org/camfx/Control1')
+		control = dbus.Interface(service, 'org.camfx.Control1')
+		
+		success = control.StopCamera()
+		if success:
+			print("Camera stopped")
+		else:
+			print("Failed to stop camera")
+	except dbus.exceptions.DBusException as e:
+		print(f"Error connecting to camfx D-Bus service: {e}")
+		print("Make sure camfx is running with D-Bus support enabled (camfx start --dbus)")
+	except ImportError:
+		print("Error: D-Bus Python bindings not available. Install dbus-python or python-dbus.")
+	except Exception as e:
+		print(f"Error: {e}")
+
+
+@cli.command('camera-status')
+def camera_status():
+	"""Get camera status via D-Bus."""
+	try:
+		import dbus
+		bus = dbus.SessionBus()
+		service = bus.get_object('org.camfx.Control1', '/org/camfx/Control1')
+		control = dbus.Interface(service, 'org.camfx.Control1')
+		
+		is_active = control.GetCameraState()
+		if is_active:
+			print("Camera is ON")
+		else:
+			print("Camera is OFF")
 	except dbus.exceptions.DBusException as e:
 		print(f"Error connecting to camfx D-Bus service: {e}")
 		print("Make sure camfx is running with D-Bus support enabled (camfx start --dbus)")

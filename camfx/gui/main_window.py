@@ -92,13 +92,35 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 		preview_frame.set_child(self.preview_widget)
 		preview_box.append(preview_frame)
 		
+		# Camera control buttons
+		camera_control_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+		
+		self.camera_toggle = Gtk.ToggleButton(label="Camera: OFF")
+		self.camera_toggle.connect('toggled', self._on_camera_toggled)
+		camera_control_box.append(self.camera_toggle)
+		
+		self.preview_toggle = Gtk.ToggleButton(label="Preview: ON")
+		self.preview_toggle.set_active(True)
+		self.preview_toggle.connect('toggled', self._on_preview_toggled)
+		camera_control_box.append(self.preview_toggle)
+		
+		preview_box.append(camera_control_box)
+		
 		# Connection status
 		if self.connected:
 			self.status_label = Gtk.Label(label="Status: Connected")
 			self.status_label.add_css_class("success")
+			# Get initial camera state
+			try:
+				camera_active = self.dbus_client.get_camera_state()
+				self.camera_toggle.set_active(camera_active)
+				self.camera_toggle.set_label("Camera: ON" if camera_active else "Camera: OFF")
+			except Exception:
+				pass
 		else:
 			self.status_label = Gtk.Label(label="Status: Not connected - Start camfx with --dbus")
 			self.status_label.add_css_class("error")
+			self.camera_toggle.set_sensitive(False)
 		self.status_label.set_xalign(0)
 		preview_box.append(self.status_label)
 		
@@ -200,8 +222,68 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 		Args:
 			is_active: True if camera is active
 		"""
-		status_text = "Status: Active" if is_active else "Status: Inactive"
-		GLib.idle_add(self.status_label.set_text, status_text)
+		# Update toggle button state (without triggering the callback)
+		GLib.idle_add(self._update_camera_toggle, is_active)
+	
+	def _update_camera_toggle(self, is_active: bool):
+		"""Update camera toggle button state without triggering callback."""
+		self.camera_toggle.handler_block_by_func(self._on_camera_toggled)
+		self.camera_toggle.set_active(is_active)
+		self.camera_toggle.set_label("Camera: ON" if is_active else "Camera: OFF")
+		self.camera_toggle.handler_unblock_by_func(self._on_camera_toggled)
+	
+	def _on_camera_toggled(self, button: Gtk.ToggleButton):
+		"""Handle camera toggle button click.
+		
+		Args:
+			button: The toggle button
+		"""
+		if not self.connected or not self.dbus_client:
+			return
+		
+		is_active = button.get_active()
+		try:
+			if is_active:
+				success = self.dbus_client.start_camera()
+				if success:
+					button.set_label("Camera: ON")
+				else:
+					button.set_active(False)
+					self._show_error("Failed to start camera")
+			else:
+				success = self.dbus_client.stop_camera()
+				if success:
+					button.set_label("Camera: OFF")
+				else:
+					button.set_active(True)
+					self._show_error("Failed to stop camera")
+		except Exception as e:
+			# Revert toggle state on error
+			button.set_active(not button.get_active())
+			button.set_label("Camera: ON" if button.get_active() else "Camera: OFF")
+			self._show_error(f"Error controlling camera: {e}")
+	
+	def _on_preview_toggled(self, button: Gtk.ToggleButton):
+		"""Handle preview toggle button click.
+		
+		Args:
+			button: The toggle button
+		"""
+		is_active = button.get_active()
+		try:
+			if is_active:
+				if hasattr(self, 'preview_widget'):
+					self.preview_widget.start_preview()
+				button.set_label("Preview: ON")
+			else:
+				if hasattr(self, 'preview_widget'):
+					self.preview_widget.stop_preview()
+				button.set_label("Preview: OFF")
+		except Exception as e:
+			# Revert toggle state on error
+			button.set_active(not is_active)
+			button.set_label("Preview: ON" if button.get_active() else "Preview: OFF")
+			self._show_error(f"Error toggling preview: {e}")
 	
 	def _show_error(self, message: str):
 		"""Show error message dialog."""
