@@ -1,18 +1,123 @@
 """Simple CLI for camfx."""
 
 import glob
+import io
 import logging
 import os
 import sys
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import TextIO
 
 import click
 
 from .core import VideoEnhancer
 
 logger = logging.getLogger('camfx.cli')
+_CLI_LOGGING_CONFIGURED = False
+_CLI_LOG_FILE: Path | None = None
+_CLI_LOG_HANDLE: TextIO | None = None
+_ORIGINAL_STDOUT: TextIO | None = None
+_ORIGINAL_STDERR: TextIO | None = None
 
 
-@click.group()
+class _RunIdentifierFilter(logging.Filter):
+	def __init__(self, run_id: str, command_name: str | None):
+		super().__init__()
+		self.run_id = run_id
+		self.command_name = (command_name or 'cli').replace(' ', '_')
+
+	def filter(self, record: logging.LogRecord) -> bool:
+		record.cli_run_id = self.run_id
+		record.cli_command = self.command_name
+		return True
+
+
+class _TeeStream(io.TextIOBase):
+	def __init__(self, original: TextIO, log_handle: TextIO, stream_name: str, run_id: str, command_name: str | None):
+		self._original = original
+		self._log_handle = log_handle
+		self._stream_name = stream_name
+		self._run_id = run_id
+		self._command_name = (command_name or 'cli').replace(' ', '_')
+
+	def write(self, s: str) -> int:
+		if not s:
+			return 0
+
+		self._original.write(s)
+		timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+		for chunk in s.splitlines(True):
+			if chunk == '':
+				continue
+			self._log_handle.write(
+				f"{timestamp} [{self._stream_name}] {self._run_id} {self._command_name} - {chunk}"
+			)
+		self._log_handle.flush()
+		return len(s)
+
+	def flush(self) -> None:
+		self._original.flush()
+		self._log_handle.flush()
+
+	def isatty(self) -> bool:
+		return getattr(self._original, 'isatty', lambda: False)()
+
+	def fileno(self) -> int:
+		return getattr(self._original, 'fileno', lambda: -1)()
+
+
+def _setup_cli_logging(command_name: str | None) -> Path:
+	global _CLI_LOGGING_CONFIGURED, _CLI_LOG_FILE
+
+	if _CLI_LOGGING_CONFIGURED and _CLI_LOG_FILE is not None:
+		return _CLI_LOG_FILE
+
+	project_root = Path(__file__).resolve().parents[1]
+	logs_dir = project_root / 'logs'
+	logs_dir.mkdir(parents=True, exist_ok=True)
+
+	log_file = logs_dir / 'cli.log'
+	run_id = uuid.uuid4().hex[:8]
+
+	file_handler = logging.FileHandler(log_file, encoding='utf-8')
+	file_handler.setLevel(logging.DEBUG)
+	file_handler.addFilter(_RunIdentifierFilter(run_id, command_name))
+	file_handler.setFormatter(logging.Formatter(
+		'%(asctime)s [%(levelname)8s] %(cli_run_id)s %(cli_command)s %(name)s:%(funcName)s:%(lineno)d - %(message)s',
+		datefmt='%Y-%m-%d %H:%M:%S'
+	))
+
+	root_logger = logging.getLogger()
+	root_logger.addHandler(file_handler)
+
+	global _CLI_LOG_HANDLE, _ORIGINAL_STDOUT, _ORIGINAL_STDERR
+	if _CLI_LOG_HANDLE is None:
+		_CLI_LOG_HANDLE = open(log_file, 'a', encoding='utf-8')
+
+	if _ORIGINAL_STDOUT is None:
+		_ORIGINAL_STDOUT = sys.stdout
+	if _ORIGINAL_STDERR is None:
+		_ORIGINAL_STDERR = sys.stderr
+
+	sys.stdout = _TeeStream(_ORIGINAL_STDOUT, _CLI_LOG_HANDLE, 'STDOUT', run_id, command_name)
+	sys.stderr = _TeeStream(_ORIGINAL_STDERR, _CLI_LOG_HANDLE, 'STDERR', run_id, command_name)
+
+	_CLI_LOGGING_CONFIGURED = True
+	_CLI_LOG_FILE = log_file
+	print(f"[camfx] Logging CLI output to: {log_file} (run_id={run_id})")
+
+	return log_file
+
+
+class CamfxCLI(click.Group):
+	def invoke(self, ctx):
+		_setup_cli_logging(ctx.invoked_subcommand)
+		return super().invoke(ctx)
+
+
+@click.group(cls=CamfxCLI)
 def cli():
 	"""camfx - Camera effects with live switching and chaining."""
 	pass
