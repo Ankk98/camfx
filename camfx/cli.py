@@ -55,58 +55,82 @@ def start(input_index: int, width: int | None, height: int | None, fps: int, nam
 		print("Stopped")
 
 
-@cli.command()
-@click.option('--name', default='camfx', type=str, help='Name of the camfx virtual camera source to preview')
-@click.option('--input', 'input_index', default=0, type=int, help='Camera index (fallback if virtual camera not found)')
-@click.option('--effect', type=click.Choice(['blur', 'replace', 'brightness', 'beautify', 'autoframe', 'gaze-correct']), help='Effect to preview (only used if virtual camera not found)')
-@click.option('--strength', type=int, help='For blur effect (must be odd)')
-@click.option('--brightness', type=int, help='For brightness effect (-100 to 100)')
-@click.option('--contrast', type=float, help='For brightness effect (0.5 to 2.0)')
-@click.option('--smoothness', type=int, help='For beautify effect (1-15)')
-@click.option('--padding', type=float, help='For autoframe effect')
-@click.option('--min-zoom', type=float, help='For autoframe effect')
-@click.option('--max-zoom', type=float, help='For autoframe effect')
-def preview(name: str, input_index: int, effect: str | None, **kwargs):
-	"""Preview output from running camfx instance, or camera feed with optional effect.
-	
-	If a camfx virtual camera is running, previews its output.
-	Otherwise, falls back to previewing camera directly with optional effect.
-	"""
+@cli.command('preview-camera')
+@click.option('--input', 'input_index', default=0, type=int, help='Camera index (e.g., 0)')
+def preview_camera(input_index: int):
+	"""Preview from a camera source."""
 	import cv2
 	import time
-	
-	logger.info(f"Starting preview command: name={name}, input_index={input_index}, effect={effect}")
-	
-	# Try to connect to PipeWire virtual camera first
+
+	logger.info(f"Starting camera preview: input_index={input_index}")
+
 	try:
-		logger.debug(f"Attempting to connect to PipeWire source '{name}'")
+		cap = cv2.VideoCapture(input_index)
+		if not cap.isOpened():
+			print(f"Error: Cannot open camera {input_index}")
+			return
+
+		print("Previewing camera feed")
+		print("Press 'q' to quit.")
+		cv2.namedWindow('camfx camera preview', cv2.WINDOW_NORMAL)
+
+		try:
+			while True:
+				ret, frame = cap.read()
+				if ret:
+					cv2.imshow('camfx camera preview', frame)
+				else:
+					print("Warning: Failed to read frame from camera")
+
+				key = cv2.waitKey(1) & 0xFF
+				if key == ord('q'):
+					break
+		finally:
+			cap.release()
+			cv2.destroyAllWindows()
+
+	except Exception as e:
+		logger.error(f"Error in camera preview: {e}", exc_info=True)
+		print(f"Error: {e}")
+
+
+@cli.command('preview-virtual')
+@click.option('--name', default='camfx', type=str, help='Name of the camfx virtual camera source to preview')
+def preview_virtual(name: str):
+	"""Preview from camfx virtual camera."""
+	import cv2
+	import time
+
+	logger.info(f"Starting virtual camera preview: name={name}")
+
+	try:
 		from .input_pipewire import PipeWireInput
 		pw_input = PipeWireInput(source_name=name)
 		logger.info(f"Successfully connected to PipeWire source '{name}'")
 		print(f"Previewing output from '{name}' virtual camera")
 		print("Press 'q' to quit.")
-		
-		cv2.namedWindow('camfx preview', cv2.WINDOW_NORMAL)
+
+		cv2.namedWindow('camfx virtual preview', cv2.WINDOW_NORMAL)
 		logger.debug("Created OpenCV preview window")
-		
+
 		try:
 			frame_count = 0
 			no_frame_count = 0
 			last_log_time = time.time()
 			logger.info("Entering preview loop")
-			
+
 			while True:
 				ret, frame = pw_input.read()
 				if ret and frame is not None:
 					logger.debug(f"Received frame: shape={frame.shape}, dtype={frame.dtype}")
-					cv2.imshow('camfx preview', frame)
+					cv2.imshow('camfx virtual preview', frame)
 					frame_count += 1
 					no_frame_count = 0
-					
+
 					if frame_count == 1:
 						logger.info("First frame received from virtual camera")
 						print("Receiving frames from virtual camera...")
-					
+
 					# Log FPS every 5 seconds
 					current_time = time.time()
 					if current_time - last_log_time >= 5.0:
@@ -123,7 +147,7 @@ def preview(name: str, input_index: int, effect: str | None, **kwargs):
 						logger.warning("No frames received for ~1 second. Is camfx start running?")
 						print("Warning: No frames received. Is camfx start running?")
 					time.sleep(0.01)
-				
+
 				key = cv2.waitKey(1) & 0xFF
 				if key == ord('q'):
 					logger.info("User pressed 'q', exiting preview")
@@ -133,40 +157,14 @@ def preview(name: str, input_index: int, effect: str | None, **kwargs):
 			pw_input.release()
 			cv2.destroyAllWindows()
 			logger.debug("Preview cleanup complete")
-		
+
 	except RuntimeError as e:
-		# Virtual camera not found, fall back to direct camera preview
-		logger.warning(f"Virtual camera '{name}' not found: {e}")
-		logger.info("Falling back to direct camera preview")
-		print(f"Virtual camera '{name}' not found: {e}")
-		print("Falling back to direct camera preview...")
-		
-		# Build effect config
-		effect_config = {}
-		if effect:
-			for key, value in kwargs.items():
-				if value is not None:
-					effect_config[key] = value
-		
-		logger.debug(f"Effect config: {effect_config}")
-		enhancer = VideoEnhancer(
-			input_index,
-			effect_type=effect or None,
-			config={
-				'enable_virtual': False,
-				**effect_config,
-			},
-		)
-		
-		try:
-			logger.info("Starting VideoEnhancer with preview=True")
-			enhancer.run(preview=True, **effect_config)
-		except KeyboardInterrupt:
-			logger.info("Preview interrupted by user")
-			print("Stopped")
-		except Exception as e:
-			logger.error(f"Error in preview fallback: {e}", exc_info=True)
-			raise
+		logger.error(f"Virtual camera '{name}' not found: {e}")
+		print(f"Error: Virtual camera '{name}' not found: {e}")
+		print("Make sure camfx is running (camfx start)")
+	except Exception as e:
+		logger.error(f"Error in virtual camera preview: {e}", exc_info=True)
+		print(f"Error: {e}")
 
 
 @cli.command('list-devices')
