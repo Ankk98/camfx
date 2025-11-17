@@ -25,35 +25,20 @@ def cli():
 @click.option('--fps', default=30, type=int, help='Virtual camera FPS')
 @click.option('--name', default='camfx', type=str, help='Name for the virtual camera source')
 @click.option('--dbus', is_flag=True, default=False, help='Enable D-Bus service for runtime effect and camera control (REQUIRED for camera toggle)')
-@click.option('--effect', type=click.Choice(['blur', 'replace', 'brightness', 'beautify', 'autoframe', 'gaze-correct']), help='Initial effect to apply')
-@click.option('--strength', type=int, help='For blur effect (must be odd)')
-@click.option('--brightness', type=int, help='For brightness effect (-100 to 100)')
-@click.option('--contrast', type=float, help='For brightness effect (0.5 to 2.0)')
-@click.option('--smoothness', type=int, help='For beautify effect (1-15)')
-@click.option('--padding', type=float, help='For autoframe effect')
-@click.option('--min-zoom', type=float, help='For autoframe effect')
-@click.option('--max-zoom', type=float, help='For autoframe effect')
-def start(input_index: int, width: int | None, height: int | None, fps: int, name: str, 
-         dbus: bool, effect: str | None, **kwargs):
+def start(input_index: int, width: int | None, height: int | None, fps: int, name: str,
+         dbus: bool):
 	"""Start camfx daemon (virtual camera service).
-	
+
 	The camera is OFF by default. Use D-Bus or CLI commands to control it:
 	- camfx camera-start: Start the camera
 	- camfx camera-stop: Stop the camera
 	- camfx camera-status: Check camera status
-	
-	Use D-Bus commands (set-effect, add-effect) to change effects at runtime.
+
+	Use D-Bus commands (set-effect, add-effect) to configure effects.
 	"""
-	# Build initial effect config
-	initial_config = {}
-	if effect:
-		for key, value in kwargs.items():
-			if value is not None:
-				initial_config[key] = value
-	
 	enhancer = VideoEnhancer(
 		input_index,
-		effect_type=effect or None,
+		effect_type=None,
 		config={
 			'width': width,
 			'height': height,
@@ -61,7 +46,6 @@ def start(input_index: int, width: int | None, height: int | None, fps: int, nam
 			'enable_virtual': True,
 			'camera_name': name,
 			'enable_dbus': dbus,
-			**initial_config,
 		},
 	)
 	

@@ -63,7 +63,10 @@ pip install -e .
 
 ```bash
 # Start virtual camera daemon (camera is OFF by default)
-camfx start --effect blur --strength 25 --dbus
+camfx start --dbus
+
+# Set initial effect
+camfx set-effect --effect blur --strength 25
 
 # Start the camera (required for video output)
 camfx camera-start
@@ -102,21 +105,17 @@ camfx camera-status
 ### Start Virtual Camera
 
 ```bash
-# Start with initial effect (camera is OFF by default)
-camfx start --effect blur --strength 25
-
-# Start with D-Bus enabled for runtime control (REQUIRED for camera toggle)
-camfx start --effect blur --strength 25 --dbus
-
-# Start without initial effect (can add effects via D-Bus)
+# Start virtual camera daemon (camera is OFF by default)
 camfx start --dbus
 
 # Custom resolution and FPS
-camfx start --effect blur --width 1280 --height 720 --fps 30
+camfx start --width 1280 --height 720 --fps 30
 
 # Custom virtual camera name
-camfx start --effect blur --name "My Virtual Camera"
+camfx start --name "My Virtual Camera"
 ```
+
+**Note**: Use `set-effect` or `add-effect` commands to configure effects after starting the daemon.
 
 **Note**: The camera is **OFF by default**. You must start it explicitly using:
 - `camfx camera-start` (CLI command)
@@ -230,8 +229,11 @@ camfx list-devices
 You can chain multiple effects together. Each effect type can only appear once in the chain - adding the same effect type again will update its parameters instead of creating a duplicate:
 
 ```bash
-# Start with blur
-camfx start --effect blur --strength 25 --dbus
+# Start daemon
+camfx start --dbus
+
+# Set initial blur effect
+camfx set-effect --effect blur --strength 25
 
 # Add brightness adjustment
 camfx add-effect --effect brightness --brightness 10
@@ -269,7 +271,10 @@ The camera is **OFF by default** when you start the daemon. You must explicitly 
 
 ```bash
 # Start the daemon
-camfx start --effect blur --strength 25 --dbus
+camfx start --dbus
+
+# Set effect
+camfx set-effect --effect blur --strength 25
 
 # Start the camera (required for video output)
 camfx camera-start
@@ -364,7 +369,10 @@ v4l2-ctl --list-devices
 
 ```bash
 # Terminal 1: Start virtual camera daemon (camera is OFF by default)
-camfx start --effect blur --strength 25 --dbus
+camfx start --dbus
+
+# Terminal 1: Set effect
+camfx set-effect --effect blur --strength 25
 
 # Terminal 1: Start the camera
 camfx camera-start
@@ -382,8 +390,11 @@ camfx camera-stop
 ### Effect Chaining
 
 ```bash
-# Start with blur
-camfx start --effect blur --strength 25 --dbus
+# Start daemon
+camfx start --dbus
+
+# Set initial blur effect
+camfx set-effect --effect blur --strength 25
 
 # Add brightness
 camfx add-effect --effect brightness --brightness 10
@@ -409,7 +420,10 @@ camfx get-effects
 
 ```bash
 # Start daemon (camera is OFF by default)
-camfx start --effect blur --strength 25 --dbus
+camfx start --dbus
+
+# Set effect
+camfx set-effect --effect blur --strength 25
 
 # Start the camera explicitly
 camfx camera-start
