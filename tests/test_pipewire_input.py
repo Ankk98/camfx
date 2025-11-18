@@ -11,8 +11,21 @@ import pytest
 from camfx.input_pipewire import (
     _find_pipewire_source_id,
     PipeWireInput,
+    PipeWireSourceInfo,
     GSTREAMER_AVAILABLE
 )
+
+
+def _make_source_info(node_id=42, name="camfx"):
+    """Helper to construct PipeWireSourceInfo for tests."""
+    return PipeWireSourceInfo(
+        id=node_id,
+        media_name=name,
+        node_name=name,
+        node_description=f"{name}-description",
+        object_path=f"node/{node_id}",
+        object_serial=str(node_id),
+    )
 
 
 class TestFindPipewireSourceId:
@@ -172,13 +185,13 @@ class TestPipeWireInputInit:
     
     def test_init_source_not_found(self):
         """Test initialization when PipeWire source doesn't exist."""
-        with patch('camfx.input_pipewire._find_pipewire_source_id', return_value=None):
+        with patch('camfx.input_pipewire._find_pipewire_source', return_value=None):
             with pytest.raises(RuntimeError, match="PipeWire source .* not found"):
                 PipeWireInput("nonexistent")
     
     def test_init_with_custom_source_name(self):
         """Test initialization with custom source name."""
-        with patch('camfx.input_pipewire._find_pipewire_source_id', return_value=42):
+        with patch('camfx.input_pipewire._find_pipewire_source', return_value=_make_source_info()):
             with patch('camfx.input_pipewire.Gst'):
                 with patch.object(PipeWireInput, '_setup_pipeline'):
                     input_obj = PipeWireInput("custom_source")
@@ -186,7 +199,7 @@ class TestPipeWireInputInit:
     
     def test_init_default_source_name(self):
         """Test initialization with default source name."""
-        with patch('camfx.input_pipewire._find_pipewire_source_id', return_value=42):
+        with patch('camfx.input_pipewire._find_pipewire_source', return_value=_make_source_info()):
             with patch('camfx.input_pipewire.Gst'):
                 with patch.object(PipeWireInput, '_setup_pipeline'):
                     input_obj = PipeWireInput()
@@ -199,13 +212,16 @@ class TestPipeWireInputPipeline:
     
     def test_setup_pipeline_creates_elements(self):
         """Test that pipeline setup creates necessary elements."""
-        with patch('camfx.input_pipewire._find_pipewire_source_id', return_value=42):
+        with patch('camfx.input_pipewire._find_pipewire_source', return_value=_make_source_info()):
             mock_gst = MagicMock()
             mock_pipeline = MagicMock()
             mock_appsink = MagicMock()
+            mock_pwsrc = MagicMock()
             
             mock_gst.parse_launch.return_value = mock_pipeline
-            mock_pipeline.get_by_name.return_value = mock_appsink
+            def get_by_name(name):
+                return mock_pwsrc if name == 'pwsrc' else (mock_appsink if name == 'sink' else None)
+            mock_pipeline.get_by_name.side_effect = get_by_name
             mock_pipeline.set_state.return_value = mock_gst.StateChangeReturn.SUCCESS
             mock_pipeline.get_state.return_value = (
                 mock_gst.StateChangeReturn.SUCCESS,
@@ -222,7 +238,7 @@ class TestPipeWireInputPipeline:
     
     def test_setup_pipeline_parse_failure(self):
         """Test handling of pipeline parse failure."""
-        with patch('camfx.input_pipewire._find_pipewire_source_id', return_value=42):
+        with patch('camfx.input_pipewire._find_pipewire_source', return_value=_make_source_info()):
             mock_gst = MagicMock()
             mock_gst.parse_launch.return_value = None
             
@@ -232,12 +248,13 @@ class TestPipeWireInputPipeline:
     
     def test_setup_pipeline_appsink_not_found(self):
         """Test handling when appsink element is not found."""
-        with patch('camfx.input_pipewire._find_pipewire_source_id', return_value=42):
+        with patch('camfx.input_pipewire._find_pipewire_source', return_value=_make_source_info()):
             mock_gst = MagicMock()
             mock_pipeline = MagicMock()
+            mock_pwsrc = MagicMock()
             
             mock_gst.parse_launch.return_value = mock_pipeline
-            mock_pipeline.get_by_name.return_value = None
+            mock_pipeline.get_by_name.side_effect = lambda name: mock_pwsrc if name == 'pwsrc' else None
             
             with patch('camfx.input_pipewire.Gst', mock_gst):
                 with pytest.raises(RuntimeError, match="Failed to get appsink element"):
@@ -245,13 +262,14 @@ class TestPipeWireInputPipeline:
     
     def test_setup_pipeline_state_change_failure(self):
         """Test handling of pipeline state change failure."""
-        with patch('camfx.input_pipewire._find_pipewire_source_id', return_value=42):
+        with patch('camfx.input_pipewire._find_pipewire_source', return_value=_make_source_info()):
             mock_gst = MagicMock()
             mock_pipeline = MagicMock()
             mock_appsink = MagicMock()
+            mock_pwsrc = MagicMock()
             
             mock_gst.parse_launch.return_value = mock_pipeline
-            mock_pipeline.get_by_name.return_value = mock_appsink
+            mock_pipeline.get_by_name.side_effect = lambda name: mock_pwsrc if name == 'pwsrc' else (mock_appsink if name == 'sink' else None)
             mock_pipeline.set_state.return_value = mock_gst.StateChangeReturn.FAILURE
             
             with patch('camfx.input_pipewire.Gst', mock_gst):
@@ -265,13 +283,14 @@ class TestPipeWireInputRead:
     
     def create_mock_input(self):
         """Create a mock PipeWireInput for testing."""
-        with patch('camfx.input_pipewire._find_pipewire_source_id', return_value=42):
+        with patch('camfx.input_pipewire._find_pipewire_source', return_value=_make_source_info()):
             mock_gst = MagicMock()
             mock_pipeline = MagicMock()
             mock_appsink = MagicMock()
+            mock_pwsrc = MagicMock()
             
             mock_gst.parse_launch.return_value = mock_pipeline
-            mock_pipeline.get_by_name.return_value = mock_appsink
+            mock_pipeline.get_by_name.side_effect = lambda name: mock_pwsrc if name == 'pwsrc' else (mock_appsink if name == 'sink' else None)
             mock_pipeline.set_state.return_value = mock_gst.StateChangeReturn.SUCCESS
             mock_pipeline.get_state.return_value = (
                 mock_gst.StateChangeReturn.SUCCESS,
@@ -361,13 +380,14 @@ class TestPipeWireInputCallbacks:
     
     def create_mock_input(self):
         """Create a mock PipeWireInput for testing."""
-        with patch('camfx.input_pipewire._find_pipewire_source_id', return_value=42):
+        with patch('camfx.input_pipewire._find_pipewire_source', return_value=_make_source_info()):
             mock_gst = MagicMock()
             mock_pipeline = MagicMock()
             mock_appsink = MagicMock()
+            mock_pwsrc = MagicMock()
             
             mock_gst.parse_launch.return_value = mock_pipeline
-            mock_pipeline.get_by_name.return_value = mock_appsink
+            mock_pipeline.get_by_name.side_effect = lambda name: mock_pwsrc if name == 'pwsrc' else (mock_appsink if name == 'sink' else None)
             mock_pipeline.set_state.return_value = mock_gst.StateChangeReturn.SUCCESS
             mock_pipeline.get_state.return_value = (
                 mock_gst.StateChangeReturn.SUCCESS,
@@ -460,13 +480,14 @@ class TestPipeWireInputCleanup:
     
     def create_mock_input(self):
         """Create a mock PipeWireInput for testing."""
-        with patch('camfx.input_pipewire._find_pipewire_source_id', return_value=42):
+        with patch('camfx.input_pipewire._find_pipewire_source', return_value=_make_source_info()):
             mock_gst = MagicMock()
             mock_pipeline = MagicMock()
             mock_appsink = MagicMock()
+            mock_pwsrc = MagicMock()
             
             mock_gst.parse_launch.return_value = mock_pipeline
-            mock_pipeline.get_by_name.return_value = mock_appsink
+            mock_pipeline.get_by_name.side_effect = lambda name: mock_pwsrc if name == 'pwsrc' else (mock_appsink if name == 'sink' else None)
             mock_pipeline.set_state.return_value = mock_gst.StateChangeReturn.SUCCESS
             mock_pipeline.get_state.return_value = (
                 mock_gst.StateChangeReturn.SUCCESS,
@@ -581,7 +602,7 @@ class TestPipeWireInputEdgeCases:
     
     def test_frame_queue_maxlen(self):
         """Test that frame queue has maxlen of 2."""
-        with patch('camfx.input_pipewire._find_pipewire_source_id', return_value=42):
+        with patch('camfx.input_pipewire._find_pipewire_source', return_value=_make_source_info()):
             with patch('camfx.input_pipewire.Gst'):
                 with patch.object(PipeWireInput, '_setup_pipeline'):
                     input_obj = PipeWireInput("test")

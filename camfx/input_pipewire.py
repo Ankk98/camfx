@@ -8,6 +8,7 @@ import time
 import numpy as np
 from typing import Optional
 from collections import deque
+from dataclasses import dataclass
 
 logger = logging.getLogger('camfx.input_pipewire')
 
@@ -24,15 +25,18 @@ except (ImportError, ValueError) as e:
 	logger.warning(f"GStreamer bindings not available: {e}")
 
 
-def _find_pipewire_source_id(source_name: str) -> Optional[int]:
-	"""Find PipeWire source object ID by name.
-	
-	Args:
-		source_name: Name of the PipeWire source
-		
-	Returns:
-		Object ID if found, None otherwise
-	"""
+@dataclass
+class PipeWireSourceInfo:
+	id: int
+	media_name: Optional[str]
+	node_name: Optional[str]
+	node_description: Optional[str]
+	object_path: Optional[str]
+	object_serial: Optional[str]
+
+
+def _find_pipewire_source(source_name: str) -> Optional[PipeWireSourceInfo]:
+	"""Locate PipeWire source metadata for the given name."""
 	logger.debug(f"Searching for PipeWire source '{source_name}'")
 	try:
 		result = subprocess.run(
@@ -48,19 +52,40 @@ def _find_pipewire_source_id(source_name: str) -> Optional[int]:
 		data = json.loads(result.stdout)
 		logger.debug(f"pw-dump returned {len(data)} objects")
 		
-		# Find source node with matching name
 		for obj in data:
-			if obj.get('type') == 'PipeWire:Interface:Node':
-				props = obj.get('info', {}).get('props', {})
-				media_class = props.get('media.class')
-				media_name = props.get('media.name')
-				if media_class == 'Video/Source':
-					logger.debug(f"Found Video/Source: '{media_name}' (id={obj.get('id')})")
-				if (media_class == 'Video/Source' and
-					media_name == source_name):
-					source_id = obj.get('id')
-					logger.info(f"Found PipeWire source '{source_name}' with id {source_id}")
-					return source_id
+			if obj.get('type') != 'PipeWire:Interface:Node':
+				continue
+			
+			props = obj.get('info', {}).get('props', {}) or {}
+			media_class = props.get('media.class')
+			media_name = props.get('media.name')
+			if media_class == 'Video/Source':
+				logger.debug(f"Found Video/Source: '{media_name}' (id={obj.get('id')})")
+			if media_class != 'Video/Source':
+				continue
+			if media_name != source_name:
+				continue
+			
+			source_id = obj.get('id')
+			if source_id is None:
+				continue
+			
+			info = PipeWireSourceInfo(
+				id=int(source_id),
+				media_name=media_name,
+				node_name=props.get('node.name'),
+				node_description=props.get('node.description'),
+				object_path=props.get('object.path'),
+				object_serial=str(props.get('object.serial') or source_id)
+			)
+			logger.info(
+				"Found PipeWire source '%s' with id=%s node_name=%s description=%s",
+				source_name,
+				info.id,
+				info.node_name,
+				info.node_description,
+			)
+			return info
 		
 		logger.warning(f"PipeWire source '{source_name}' not found in pw-dump output")
 		return None
@@ -71,8 +96,14 @@ def _find_pipewire_source_id(source_name: str) -> Optional[int]:
 		logger.error(f"Failed to parse pw-dump JSON output: {e}")
 		return None
 	except Exception as e:
-		logger.error(f"Exception in _find_pipewire_source_id: {e}", exc_info=True)
+		logger.error(f"Exception in _find_pipewire_source: {e}", exc_info=True)
 		return None
+
+
+def _find_pipewire_source_id(source_name: str) -> Optional[int]:
+	"""Backward-compatible helper that returns only the PipeWire node id."""
+	info = _find_pipewire_source(source_name)
+	return info.id if info else None
 
 
 class PipeWireInput:
@@ -92,40 +123,112 @@ class PipeWireInput:
 		self.source_name = source_name
 		self.pipeline: Optional[Gst.Pipeline] = None
 		self.appsink: Optional[Gst.Element] = None
+		self.pipewire_src: Optional[Gst.Element] = None
+		self.source_info: Optional[PipeWireSourceInfo] = None
 		self.width: Optional[int] = None
 		self.height: Optional[int] = None
 		self.frame_queue = deque(maxlen=2)  # Keep latest 2 frames
 		self.running = False
 		self.lock = threading.Lock()
 		self.sample_available = threading.Event()  # Signal when new sample is available
+		self._frames_received = 0
+		self._last_sample_log = 0.0
+		self._last_empty_log = 0.0
 		
 		Gst.init(None)
-		self._setup_pipeline()
+		self._setup_pipeline_with_retry()
+	
+	def _setup_pipeline_with_retry(self, max_attempts: int = 3, base_delay: float = 0.5):
+		"""Attempt to set up the pipeline with retries on transient errors."""
+		attempt = 0
+		while True:
+			try:
+				self._setup_pipeline()
+				return
+			except RuntimeError as exc:
+				attempt += 1
+				if attempt >= max_attempts:
+					logger.error("Failed to initialize PipeWireInput after %s attempts", attempt)
+					raise
+				delay = base_delay * attempt
+				logger.warning(
+					"PipeWireInput setup failed (%s). Retrying in %.1fs (attempt %s/%s)",
+					exc,
+					delay,
+					attempt + 1,
+					max_attempts,
+				)
+				self._teardown_pipeline()
+				time.sleep(delay)
 	
 	def _setup_pipeline(self):
 		"""Set up GStreamer pipeline to read from PipeWire source."""
-		# Find the PipeWire source object ID
-		source_id = _find_pipewire_source_id(self.source_name)
-		if source_id is None:
+		# Find PipeWire source metadata
+		source_info = _find_pipewire_source(self.source_name)
+		if source_info is None:
 			logger.error(f"PipeWire source '{self.source_name}' not found")
 			raise RuntimeError(
 				f"PipeWire source '{self.source_name}' not found. "
 				f"Make sure 'camfx start' is running."
 			)
+		self.source_info = source_info
+		logger.info(
+			"Setting up PipeWireInput for '%s' (node_id=%s, node_name=%s, path=%s)",
+			self.source_name,
+			source_info.id,
+			source_info.node_name,
+			source_info.object_path,
+		)
 		
 		# Create pipeline using string (simpler and often more reliable)
 		# pipewiresrc -> videoconvert -> appsink with BGR format
 		pipeline_str = (
-			f'pipewiresrc path={source_id} do-timestamp=true ! '
-			f'videoconvert ! '
-			f'video/x-raw,format=BGR ! '
-			f'appsink name=sink'
+			'pipewiresrc name=pwsrc do-timestamp=true ! '
+			'videoconvert ! '
+			'video/x-raw,format=BGR ! '
+			'appsink name=sink'
 		)
+		logger.debug("Input pipeline description: %s", pipeline_str)
 		
 		self.pipeline = Gst.parse_launch(pipeline_str)
 		if self.pipeline is None:
 			logger.error("Failed to parse GStreamer pipeline")
 			raise RuntimeError("Failed to parse GStreamer pipeline")
+		
+		# Get pipewiresrc element for configuration
+		pwsrc_element = self.pipeline.get_by_name('pwsrc')
+		if pwsrc_element is None:
+			logger.error("Failed to get pipewiresrc element from pipeline")
+			raise RuntimeError("Failed to get pipewiresrc element")
+		self.pipewire_src = pwsrc_element
+		
+		target_candidates = [
+			source_info.media_name,
+			self.source_name,
+			source_info.node_description,
+			source_info.node_name,
+			source_info.object_serial,
+		]
+		target_object = next((str(c) for c in target_candidates if c), None)
+		if target_object:
+			self.pipewire_src.set_property('target-object', target_object)
+		# Provide friendly client name when supported
+		try:
+			self.pipewire_src.set_property('client-name', 'camfx GUI Preview')
+		except (TypeError, AttributeError):
+			pass
+		actual_target = self.pipewire_src.get_property('target-object')
+		
+		actual_path = None
+		if source_info.object_path:
+			self.pipewire_src.set_property('path', source_info.object_path)
+			actual_path = self.pipewire_src.get_property('path')
+		
+		logger.info(
+			"Configured pipewiresrc with target_object=%s path=%s",
+			actual_target,
+			actual_path,
+		)
 		
 		# Get appsink and connect signal
 		appsink_element = self.pipeline.get_by_name('sink')
@@ -163,6 +266,7 @@ class PipeWireInput:
 		if ret == Gst.StateChangeReturn.FAILURE:
 			logger.error("Failed to start GStreamer pipeline")
 			raise RuntimeError("Failed to start GStreamer pipeline")
+		logger.debug("Requested input pipeline PLAYING transition (ret=%s)", ret)
 		
 		# Wait for pipeline to transition to PLAYING
 		max_wait = 10  # seconds
@@ -193,6 +297,7 @@ class PipeWireInput:
 		# Even if in PAUSED, we can still try to read frames
 		self.running = True
 		time.sleep(0.5)  # Wait a bit for first frame
+		logger.info("PipeWireInput pipeline started (source=%s)", self.source_name)
 		
 	
 	def _on_bus_message(self, bus, message):
@@ -270,6 +375,17 @@ class PipeWireInput:
 					self.frame_queue.append(frame.copy())
 					self.sample_available.set()
 					logger.debug(f"Frame queued: {width}x{height}")
+					self._frames_received += 1
+					now = time.time()
+					if self._frames_received == 1 or now - self._last_sample_log >= 5.0:
+						logger.debug(
+							"Total frames received from '%s': %s (latest %sx%s)",
+							self.source_name,
+							self._frames_received,
+							width,
+							height,
+						)
+						self._last_sample_log = now
 					
 				finally:
 					buffer.unmap(map_info)
@@ -287,10 +403,18 @@ class PipeWireInput:
 		if not self.running or self.appsink is None:
 			return False, None
 		
+		# Wait briefly for frame availability to avoid busy-polling
+		if not self.frame_queue:
+			self.sample_available.wait(timeout=0.05)
+		
+		now = time.time()
+		
 		# Check if we have frames in the queue (from signal callback)
 		with self.lock:
 			if self.frame_queue:
-				frame = self.frame_queue[-1]  # Get latest frame
+				frame = self.frame_queue.pop()  # Get latest frame and remove
+				if not self.frame_queue:
+					self.sample_available.clear()
 				return True, frame.copy()
 		
 		# Try to manually pull a sample
@@ -315,21 +439,45 @@ class PipeWireInput:
 										# Store in queue for next time
 										with self.lock:
 											self.frame_queue.append(frame.copy())
+											self.sample_available.set()
 										return True, frame.copy()
 						finally:
 							buffer.unmap(map_info)
 		except Exception:
 			pass
 		
+		if now - self._last_empty_log >= 2.0:
+			logger.debug(
+				"No frames currently available from PipeWireInput (running=%s, appsink=%s)",
+				self.running,
+				self.appsink is not None,
+			)
+			self._last_empty_log = now
 		return False, None
 	
 	def release(self):
 		"""Release resources."""
 		self.running = False
+		logger.info("Releasing PipeWireInput resources (frames_received=%s)", self._frames_received)
+		self._teardown_pipeline()
+		self.sample_available.set()
+	
+	def _teardown_pipeline(self):
+		"""Helper to shutdown and clear pipeline elements."""
 		if self.pipeline:
-			self.pipeline.set_state(Gst.State.NULL)
-			self.pipeline = None
+			try:
+				bus = self.pipeline.get_bus()
+				if bus:
+					bus.remove_signal_watch()
+			except Exception:
+				pass
+			try:
+				self.pipeline.set_state(Gst.State.NULL)
+			except Exception:
+				pass
+		self.pipeline = None
 		self.appsink = None
+		self.pipewire_src = None
 	
 	def isOpened(self) -> bool:
 		"""Check if input is opened."""

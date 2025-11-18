@@ -40,6 +40,12 @@ class PreviewWidget(Gtk.Box):
 		self.preview_thread: Optional[threading.Thread] = None
 		self.running = False
 		self.current_frame: Optional[np.ndarray] = None
+		self._frame_log_interval = 1.0
+		self._last_frame_log = 0.0
+		self._ui_log_interval = 1.0
+		self._last_ui_log = 0.0
+		self._placeholder_displayed = False
+		self._last_placeholder_reason: Optional[str] = None
 		
 		# Create picture widget for displaying frames
 		self.picture = Gtk.Picture()
@@ -76,15 +82,25 @@ class PreviewWidget(Gtk.Box):
 		self.preview_thread = threading.Thread(target=self._preview_loop, daemon=True)
 		self.preview_thread.start()
 		logger.debug("Preview thread started")
+		self._placeholder_displayed = False
+		self._update_status("Preview: Connecting…")
 	
-	def stop_preview(self):
+	def stop_preview(self, reason: str | None = None):
 		"""Stop preview thread."""
-		logger.info("Stopping preview")
+		if reason and self._last_placeholder_reason == reason and not self.running:
+			self._show_placeholder(reason)
+			return
+		
+		if self.running:
+			if reason:
+				logger.info("Stopping preview (%s)", reason)
+			else:
+				logger.info("Stopping preview")
+		else:
+			logger.info("Stopping preview (%s)", reason or "already stopped")
+		
 		self.running = False
-		if self.pipewire_input:
-			self.pipewire_input.release()
-			self.pipewire_input = None
-			logger.debug("PipeWireInput released")
+		self._release_pipewire_input()
 		if self.preview_thread:
 			self.preview_thread.join(timeout=2.0)
 			if self.preview_thread.is_alive():
@@ -96,6 +112,10 @@ class PreviewWidget(Gtk.Box):
 			else:
 				logger.debug("Preview thread stopped")
 			self.preview_thread = None
+		message = reason or "Preview: Not connected"
+		self._show_placeholder(message)
+		self._placeholder_displayed = True
+		self._last_placeholder_reason = reason
 	
 	def restart_preview(self):
 		"""Restart preview with current source."""
@@ -103,29 +123,52 @@ class PreviewWidget(Gtk.Box):
 		self.stop_preview()
 		self.start_preview()
 	
+	def is_running(self) -> bool:
+		"""Return True if preview thread is active."""
+		return self.running
+	
+	def show_camera_inactive_message(self):
+		"""Display placeholder when camera is off."""
+		self.stop_preview(reason="Camera is OFF")
+	
+	def show_preview_disabled_message(self):
+		"""Display placeholder when preview toggle is off."""
+		self.stop_preview(reason="Preview disabled")
+	
+	def _show_placeholder(self, message: str):
+		"""Update UI with placeholder message and blank frame."""
+		self._update_status(message)
+		self.picture.set_pixbuf(None)
+		self.current_frame = None
+		self._placeholder_displayed = True
+	
 	def _preview_loop(self):
 		"""Preview loop running in separate thread."""
 		logger.debug("Preview loop thread started")
 		
 		# Try to connect to PipeWire source
 		if PIPEWIRE_AVAILABLE:
-			try:
-				logger.info(f"Connecting to PipeWire source '{self.source_name}'")
-				self.pipewire_input = PipeWireInput(source_name=self.source_name)
-				logger.info("Successfully connected to PipeWire source")
-				GLib.idle_add(self._update_status, "Preview: Connected")
-			except RuntimeError as e:
-				logger.error(f"RuntimeError connecting to PipeWire source: {e}")
-				error_msg = f"Preview: {str(e)}"
-				GLib.idle_add(self._update_status, error_msg)
-				self.running = False
-				return
-			except Exception as e:
-				logger.error(f"Exception connecting to PipeWire source: {e}", exc_info=True)
-				error_msg = f"Preview: Error - {str(e)}"
-				GLib.idle_add(self._update_status, error_msg)
-				self.running = False
-				return
+			while self.running and self.pipewire_input is None:
+				try:
+					logger.info(f"Connecting to PipeWire source '{self.source_name}'")
+					self.pipewire_input = PipeWireInput(source_name=self.source_name)
+					logger.info("Successfully connected to PipeWire source")
+					GLib.idle_add(self._update_status, "Preview: Connected")
+				except RuntimeError as e:
+					if not self.running:
+						return
+					logger.warning("Virtual camera busy: %s", e)
+					GLib.idle_add(self._update_status, "Preview: Virtual camera busy, retrying…")
+					self._release_pipewire_input()
+					time.sleep(0.5)
+				except Exception as e:
+					logger.error(f"Exception connecting to PipeWire source: {e}", exc_info=True)
+					error_msg = f"Preview: Error - {str(e)}"
+					GLib.idle_add(self._update_status, error_msg)
+					self.running = False
+					return
+				if not self.running:
+					return
 		else:
 			logger.error("PipeWire not available")
 			GLib.idle_add(self._update_status, "Preview: PipeWire not available")
@@ -145,7 +188,8 @@ class PreviewWidget(Gtk.Box):
 				try:
 					ret, frame = self.pipewire_input.read()
 					if ret and frame is not None:
-						logger.debug(f"Frame received: shape={frame.shape}, dtype={frame.dtype}")
+						if self._should_log_debug('_last_frame_log', self._frame_log_interval):
+							logger.debug("Frame received: shape=%s, dtype=%s", frame.shape, frame.dtype)
 						self.current_frame = frame
 						GLib.idle_add(self._update_frame, frame)
 						
@@ -154,11 +198,12 @@ class PreviewWidget(Gtk.Box):
 						no_frame_count = 0
 						current_time = time.time()
 						if current_time - last_fps_time >= 1.0:
-							fps = frame_count
+							elapsed = current_time - last_fps_time
+							fps = frame_count / elapsed if elapsed > 0 else 0.0
 							frame_count = 0
 							last_fps_time = current_time
-							logger.debug(f"Preview FPS: {fps}")
-							GLib.idle_add(self._update_status, f"Status: Connected ({fps} FPS)")
+							logger.debug(f"Preview FPS: {fps:.2f}")
+							GLib.idle_add(self._update_status, f"Status: Connected ({fps:.2f} FPS)")
 						
 						# Log summary every 10 seconds
 						if current_time - last_log_time >= 10.0:
@@ -181,24 +226,28 @@ class PreviewWidget(Gtk.Box):
 		
 		# Cleanup
 		logger.info("Exiting preview loop, cleaning up")
+		self._release_pipewire_input()
+
+	def _release_pipewire_input(self):
 		if self.pipewire_input:
 			try:
 				self.pipewire_input.release()
-				logger.debug("PipeWireInput released in cleanup")
+				logger.debug("PipeWireInput released")
 			except Exception as e:
 				logger.error(f"Error releasing PipeWireInput: {e}", exc_info=True)
-			self.pipewire_input = None
+		self.pipewire_input = None
 	
 	def _update_frame(self, frame: np.ndarray):
 		"""Update picture widget with new frame (called from main thread)."""
 		if not self.running:
-			logger.debug("Preview not running, skipping frame update")
 			return
 		
 		try:
 			# Convert numpy array to GdkPixbuf
 			height, width = frame.shape[:2]
-			logger.debug(f"Updating frame: {width}x{height}")
+			if self._should_log_debug('_last_ui_log', self._ui_log_interval):
+				logger.debug("Updating frame: %sx%s", width, height)
+			self._placeholder_displayed = False
 			
 			# Validate frame dimensions
 			if width <= 0 or height <= 0:
@@ -207,12 +256,10 @@ class PreviewWidget(Gtk.Box):
 			
 			# Convert BGR to RGB
 			frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-			logger.debug("Converted BGR to RGB")
 			
 			# Ensure frame is contiguous in memory
 			if not frame_rgb.flags['C_CONTIGUOUS']:
 				frame_rgb = np.ascontiguousarray(frame_rgb)
-				logger.debug("Made frame contiguous")
 			
 			# Create pixbuf
 			pixbuf = GdkPixbuf.Pixbuf.new_from_data(
@@ -224,18 +271,15 @@ class PreviewWidget(Gtk.Box):
 				height,
 				width * 3
 			)
-			logger.debug("Created GdkPixbuf")
 			
 			# Update picture widget
 			self.picture.set_pixbuf(pixbuf)
-			logger.debug("Updated picture widget")
 			
 			# Update fullscreen window if open
 			if self.fullscreen_window:
 				fullscreen_picture = self.fullscreen_window.get_child()
 				if fullscreen_picture and isinstance(fullscreen_picture, Gtk.Picture):
 					fullscreen_picture.set_pixbuf(pixbuf)
-					logger.debug("Updated fullscreen picture")
 		
 		except Exception as e:
 			logger.error(f"Error updating frame: {e}", exc_info=True)
@@ -281,4 +325,13 @@ class PreviewWidget(Gtk.Box):
 		if self.fullscreen_window:
 			self.fullscreen_window.destroy()
 			self.fullscreen_window = None
+
+	def _should_log_debug(self, attr_name: str, interval: float) -> bool:
+		"""Return True if a debug log should be emitted for the given attribute."""
+		now = time.time()
+		last = getattr(self, attr_name, 0.0)
+		if now - last >= interval:
+			setattr(self, attr_name, now)
+			return True
+		return False
 

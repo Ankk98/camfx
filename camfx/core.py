@@ -22,6 +22,15 @@ class VideoEnhancer:
 		self.camera_source_id = self._normalize_source_id(input_device)
 		self.camera_source_index = self._source_id_to_index(self.camera_source_id)
 		self._capability_cache: Dict[str, List[Dict[str, object]]] = {}
+		self._last_camera_state_log = 0.0
+		self._last_inactive_log = 0.0
+		self._last_frame_failure_log = 0.0
+		self._last_black_frame_log = 0.0
+		self._last_virtual_send_log = 0.0
+		self._virtual_frames_sent = 0
+		self._black_frames_sent = 0
+		self._last_effect_chain_signature: Optional[str] = None
+		self._virtual_warning_logged = False
 		
 		# Camera is not opened immediately - requires explicit start via D-Bus or CLI
 		self.cap: Optional[cv2.VideoCapture] = None
@@ -50,6 +59,16 @@ class VideoEnhancer:
 		self.width = target_width or 640
 		self.height = target_height or 480
 		print("Camera is off by default. Use D-Bus or CLI to start it.")
+		self._log_checkpoint(
+			'init',
+			source=self.camera_source_id,
+			source_index=self.camera_source_index,
+			width=self.width,
+			height=self.height,
+			target_fps=self.target_fps,
+			enable_virtual=self.enable_virtual,
+			camera_name=self.camera_name,
+		)
 		
 		# Virtual camera output via PipeWire (always initialize, even if camera not active)
 		self.virtual_cam = None
@@ -93,18 +112,42 @@ class VideoEnhancer:
 		# (for future extensibility)
 		return effect_config
 	
+	def _log_checkpoint(self, stage: str, level: int = logging.INFO, **details) -> None:
+		"""Emit structured log lines that act as debugging checkpoints."""
+		if not logger.isEnabledFor(level):
+			return
+		payload = " ".join(f"{key}={value!r}" for key, value in details.items())
+		if payload:
+			logger.log(level, "[checkpoint:%s] %s", stage, payload)
+		else:
+			logger.log(level, "[checkpoint:%s]", stage)
+	
 	def _start_camera(self):
 		"""Start camera capture."""
 		with self.camera_lock:
 			if self.cap is not None:
+				logger.debug("Camera start requested but capture is already active")
 				return  # Already started
 			
+			self._log_checkpoint(
+				'camera.start.request',
+				source_id=self.camera_source_id,
+				source_index=self.camera_source_index,
+				requested_width=self.config.get('width'),
+				requested_height=self.config.get('height'),
+			)
 			self.cap = self._open_capture_for_source()
 			if self.cap is None or not self.cap.isOpened():
 				if self.cap:
 					self.cap.release()
 				self.cap = None
 				self.camera_active = False
+				logger.error("Failed to open camera source %s", self.camera_source_id)
+				self._log_checkpoint(
+					'camera.start.failed',
+					level=logging.ERROR,
+					source_id=self.camera_source_id,
+				)
 				return
 			
 			# Set resolution if specified
@@ -118,40 +161,65 @@ class VideoEnhancer:
 			self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 			
 			self.camera_active = True
+			self._last_camera_state_log = time.time()
+			self._log_checkpoint(
+				'camera.start.success',
+				actual_width=self.width,
+				actual_height=self.height,
+				fps=self.target_fps,
+			)
 	
 	def _stop_camera(self):
 		"""Stop camera capture."""
 		with self.camera_lock:
 			if self.cap is None:
 				self.camera_active = False
+				logger.debug("Camera stop requested but capture already released")
 				return
 			
+			self._log_checkpoint('camera.stop.request')
 			self.cap.release()
 			self.cap = None
 			self.camera_active = False
+			self._last_camera_state_log = time.time()
+			self._log_checkpoint('camera.stop.success')
 	
 	def _open_capture_for_source(self) -> Optional[cv2.VideoCapture]:
 		"""Create a VideoCapture for the current source."""
 		if self.camera_source_index is not None:
+			logger.debug("Attempting to open camera index %s", self.camera_source_index)
 			cap = cv2.VideoCapture(self.camera_source_index)
 			if cap and cap.isOpened():
+				logger.debug("Successfully opened camera index %s", self.camera_source_index)
 				return cap
 			if cap:
+				logger.debug("Failed to open camera index %s", self.camera_source_index)
 				cap.release()
 		
+		logger.debug("Attempting to open camera source %s", self.camera_source_id)
 		cap = cv2.VideoCapture(self.camera_source_id)
 		if cap and cap.isOpened():
+			logger.debug("Successfully opened camera source %s", self.camera_source_id)
 			return cap
 		if cap:
+			logger.debug("Failed to open camera source %s", self.camera_source_id)
 			cap.release()
 		return None
 	
 	def _create_virtual_output(self):
 		"""Initialize virtual camera output with current dimensions."""
 		if not self.enable_virtual:
+			logger.info("Virtual camera output disabled via configuration")
 			return
 		
 		try:
+			self._log_checkpoint(
+				'virtual.create.attempt',
+				width=self.width,
+				height=self.height,
+				fps=self.target_fps,
+				name=self.camera_name,
+			)
 			print(f"Initializing PipeWire virtual camera ({self.width}x{self.height} @ {self.target_fps}fps)...")
 			self.virtual_cam = PipeWireOutput(
 				width=self.width,
@@ -160,6 +228,8 @@ class VideoEnhancer:
 				name=self.camera_name,
 			)
 			print("PipeWire virtual camera ready")
+			self._log_checkpoint('virtual.create.success', name=self.camera_name)
+			self._virtual_warning_logged = False
 		except Exception as exc:
 			print(f"Warning: Failed to initialize PipeWire virtual camera: {exc}")
 			print("Continuing with preview only. To enable virtual camera:")
@@ -167,12 +237,19 @@ class VideoEnhancer:
 			print("  2. Ensure wireplumber is running: systemctl --user start wireplumber")
 			print("  3. Or use --no-virtual to skip virtual camera initialization")
 			self.virtual_cam = None
+			self._log_checkpoint(
+				'virtual.create.failed',
+				level=logging.ERROR,
+				error=str(exc),
+			)
+			logger.error("Failed to initialize virtual camera", exc_info=True)
 	
 	def _cleanup_virtual_output(self):
 		"""Release existing virtual camera pipeline."""
 		if self.virtual_cam is None:
 			return
 		try:
+			self._log_checkpoint('virtual.cleanup')
 			self.virtual_cam.cleanup()
 		except Exception as exc:
 			logger.error(f"Error cleaning up virtual camera: {exc}", exc_info=True)
@@ -183,6 +260,7 @@ class VideoEnhancer:
 		"""Recreate virtual camera pipeline with new dimensions."""
 		if not self.enable_virtual:
 			return
+		self._log_checkpoint('virtual.recreate')
 		old_virtual = self.virtual_cam
 		self.virtual_cam = None
 		if old_virtual:
@@ -217,6 +295,13 @@ class VideoEnhancer:
 	def apply_camera_config(self, source_id: str, width: int, height: int, fps: int) -> bool:
 		"""Apply a new camera configuration."""
 		with self.camera_lock:
+			self._log_checkpoint(
+				'camera.config.apply',
+				source_id=source_id,
+				width=width,
+				height=height,
+				fps=fps,
+			)
 			restart_camera = self.camera_active
 			self._stop_camera()
 			self.camera_source_id = self._normalize_source_id(source_id)
@@ -230,6 +315,14 @@ class VideoEnhancer:
 			self._recreate_virtual_output()
 			if restart_camera:
 				self._start_camera()
+			self._log_checkpoint(
+				'camera.config.applied',
+				restarted=restart_camera,
+				source_id=self.camera_source_id,
+				width=self.width,
+				height=self.height,
+				fps=self.target_fps,
+			)
 		return True
 	
 	def _normalize_source_id(self, source: int | str) -> str:
@@ -277,12 +370,30 @@ class VideoEnhancer:
 				print("Preview window created. Press 'q' to quit.")
 			
 			# Camera is not auto-started - must be started explicitly via D-Bus or CLI
+			self._log_checkpoint('loop.start', preview=preview)
 			frame_count = 0
+			frames_since_log = 0
 			last_log_time = time.time()
 			
 			while True:
+				if self.virtual_cam is None and self.enable_virtual and not self._virtual_warning_logged:
+					logger.warning("Virtual camera enabled but not initialized; frames will not be sent")
+					self._log_checkpoint('virtual.unavailable', level=logging.WARNING)
+					self._virtual_warning_logged = True
+				elif self.virtual_cam is not None and self._virtual_warning_logged:
+					self._virtual_warning_logged = False
+					self._log_checkpoint('virtual.available')
+				
 				# Check if camera is active
 				if not self.camera_active:
+					now = time.time()
+					if now - self._last_inactive_log >= 5.0:
+						self._log_checkpoint(
+							'camera.inactive',
+							virtual_ready=bool(self.virtual_cam),
+							reason='camera_off',
+						)
+						self._last_inactive_log = now
 					# Send a black frame when camera is off
 					if self.virtual_cam is not None:
 						black_frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
@@ -290,8 +401,21 @@ class VideoEnhancer:
 						try:
 							self.virtual_cam.send(frame_rgb.tobytes())
 							self.virtual_cam.sleep_until_next_frame()
+							self._black_frames_sent += 1
+							if self._black_frames_sent == 1 or now - self._last_black_frame_log >= 5.0:
+								self._log_checkpoint(
+									'virtual.black_frame',
+									total=self._black_frames_sent,
+									resolution=f"{self.width}x{self.height}",
+								)
+								self._last_black_frame_log = now
 						except Exception as e:
 							logger.error(f"Error sending black frame to virtual camera: {e}", exc_info=True)
+							self._log_checkpoint(
+								'virtual.black_frame.error',
+								level=logging.ERROR,
+								error=str(e),
+							)
 					
 					if preview:
 						display_frame = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -308,16 +432,34 @@ class VideoEnhancer:
 				# Camera is active, process frames
 				if self.cap is None:
 					self.camera_active = False
+					logger.warning("Camera marked active but VideoCapture handle is None; restarting soon")
 					time.sleep(0.1)
 					continue
 				
 				ret, frame = self.cap.read()
 				if not ret or frame is None:
+					now = time.time()
+					if now - self._last_frame_failure_log >= 2.0:
+						logger.warning("Camera read returned no frame (ret=%s); backing off briefly", ret)
+						self._log_checkpoint(
+							'camera.frame.empty',
+							level=logging.WARNING,
+							ret=ret,
+						)
+						self._last_frame_failure_log = now
 					time.sleep(0.1)
 					continue
 				
 				# Get effect chain
 				chain = self.effect_controller.get_chain()
+				chain_signature = ",".join(effect.__class__.__name__ for effect, _ in chain.effects) or "none"
+				if chain_signature != self._last_effect_chain_signature:
+					self._log_checkpoint(
+						'effects.chain',
+						chain=chain_signature,
+						length=len(chain.effects),
+					)
+					self._last_effect_chain_signature = chain_signature
 				
 				# Determine if any effect in chain needs a mask
 				needs_mask = False
@@ -333,13 +475,23 @@ class VideoEnhancer:
 				
 				# Initialize segmenter if needed
 				if needs_mask and self.segmenter is None:
+					self._log_checkpoint('segmenter.init', reason='mask_required')
 					self.segmenter = PersonSegmenter()
 				
 				# Get mask if needed
 				mask = self.segmenter.get_mask(frame) if needs_mask else None
 				
 				# Apply effect chain
-				processed = chain.apply(frame, mask, **kwargs)
+				try:
+					processed = chain.apply(frame, mask, **kwargs)
+				except Exception as effect_error:
+					logger.error("Effect chain processing failed: %s", effect_error, exc_info=True)
+					self._log_checkpoint(
+						'effects.apply.failed',
+						level=logging.ERROR,
+						error=str(effect_error),
+					)
+					processed = frame
 				
 				# Send to virtual camera
 				if self.virtual_cam is not None:
@@ -347,8 +499,23 @@ class VideoEnhancer:
 						frame_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
 						self.virtual_cam.send(frame_rgb.tobytes())
 						self.virtual_cam.sleep_until_next_frame()
+						self._virtual_frames_sent += 1
+						now = time.time()
+						if self._virtual_frames_sent == 1 or now - self._last_virtual_send_log >= 5.0:
+							self._log_checkpoint(
+								'virtual.send',
+								total=self._virtual_frames_sent,
+								resolution=f"{self.width}x{self.height}",
+								camera_active=self.camera_active,
+							)
+							self._last_virtual_send_log = now
 					except Exception as e:
 						logger.error(f"Error sending frame to virtual camera: {e}", exc_info=True)
+						self._log_checkpoint(
+							'virtual.send.failed',
+							level=logging.ERROR,
+							error=str(e),
+						)
 				
 				# Show preview
 				if preview:
@@ -358,8 +525,23 @@ class VideoEnhancer:
 						break
 				
 				frame_count += 1
+				frames_since_log += 1
 				if frame_count == 1:
 					print(f"Processing frames... (Press 'q' in preview window to quit)")
+					self._log_checkpoint('loop.first_frame')
+				
+				now = time.time()
+				if now - last_log_time >= 10.0:
+					elapsed = now - last_log_time
+					fps = frames_since_log / (elapsed if elapsed > 0 else 1)
+					self._log_checkpoint(
+						'loop.fps',
+						fps=f"{fps:.2f}",
+						virtual_frames=self._virtual_frames_sent,
+						camera_active=self.camera_active,
+					)
+					frames_since_log = 0
+					last_log_time = now
 		
 		finally:
 			self._stop_camera()

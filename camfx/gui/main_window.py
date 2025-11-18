@@ -10,6 +10,7 @@ from .dbus_client import CamfxDBusClient
 from .preview_widget import PreviewWidget
 from .effect_chain_widget import EffectChainWidget
 from .effect_controls import EffectControlsWidget
+from .direct_camera_preview import DirectCameraPreview
 
 
 class CamfxMainWindow(Gtk.ApplicationWindow):
@@ -27,6 +28,7 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 		# Initialize connection state
 		self.dbus_client = None
 		self.connected = False
+		self.camera_state_active = False
 		
 		# Try to connect to D-Bus service (non-blocking, don't fail if unavailable)
 		try:
@@ -62,33 +64,59 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 			traceback.print_exc()
 			raise
 		
-		# Start preview (non-blocking, don't fail if preview unavailable)
-		if hasattr(self, 'preview_widget'):
-			try:
-				self.preview_widget.start_preview()
-			except Exception as e:
-				print(f"Warning: Could not start preview: {e}")
+		# Sync previews (both default OFF)
+		self._initialize_preview_state()
 	
 	def _build_ui(self):
 		"""Build the user interface."""
-		# Main container
-		main_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+		main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
 		main_box.set_margin_start(10)
 		main_box.set_margin_end(10)
 		main_box.set_margin_top(10)
 		main_box.set_margin_bottom(10)
 		self.set_child(main_box)
 		
-		# Left pane: Preview
-		preview_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-		preview_box.set_size_request(640, 480)
+		self.stack = Gtk.Stack()
+		self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+		self.stack.set_vexpand(True)
 		
-		preview_label = Gtk.Label()
-		preview_label.set_markup("<b>Live Preview</b>")
+		switcher = Gtk.StackSwitcher()
+		switcher.set_stack(self.stack)
+		switcher.set_margin_bottom(6)
+		main_box.append(switcher)
+		main_box.append(self.stack)
+		
+		camera_setup_page = self._build_camera_setup_page()
+		virtual_preview_page = self._build_virtual_preview_page()
+		
+		self.stack.add_titled(camera_setup_page, "camera_setup", "Camera Setup")
+		self.stack.add_titled(virtual_preview_page, "virtual_preview", "Virtual Preview")
+		
+		if self.connected:
+			GLib.idle_add(self._load_initial_camera_data)
+	
+	def _build_camera_setup_page(self) -> Gtk.Widget:
+		page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+		self.direct_preview_widget = DirectCameraPreview()
+		page.append(self.direct_preview_widget)
+		
+		control_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+		self.direct_preview_toggle = Gtk.ToggleButton(label="Direct Preview: OFF")
+		self.direct_preview_toggle.set_active(False)
+		self.direct_preview_toggle.connect('toggled', self._on_direct_preview_toggled)
+		control_box.append(self.direct_preview_toggle)
+		page.append(control_box)
+		
+		self._build_camera_settings(page)
+		return page
+	
+	def _build_virtual_preview_page(self) -> Gtk.Widget:
+		page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+		
+		preview_label = Gtk.Label(label="Virtual Camera Preview")
 		preview_label.set_xalign(0)
-		preview_box.append(preview_label)
+		page.append(preview_label)
 		
-		# Create a frame/border for the preview
 		preview_frame = Gtk.Frame()
 		preview_frame.set_margin_start(5)
 		preview_frame.set_margin_end(5)
@@ -97,29 +125,26 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 		
 		self.preview_widget = PreviewWidget(source_name="camfx")
 		preview_frame.set_child(self.preview_widget)
-		preview_box.append(preview_frame)
+		page.append(preview_frame)
 		
-		# Camera control buttons
-		camera_control_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-		
+		toggle_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
 		self.camera_toggle = Gtk.ToggleButton(label="Camera: OFF")
 		self.camera_toggle.connect('toggled', self._on_camera_toggled)
-		camera_control_box.append(self.camera_toggle)
+		toggle_box.append(self.camera_toggle)
 		
-		self.preview_toggle = Gtk.ToggleButton(label="Preview: ON")
-		self.preview_toggle.set_active(True)
+		self.preview_toggle = Gtk.ToggleButton(label="Preview: OFF")
+		self.preview_toggle.set_active(False)
 		self.preview_toggle.connect('toggled', self._on_preview_toggled)
-		camera_control_box.append(self.preview_toggle)
+		toggle_box.append(self.preview_toggle)
+		page.append(toggle_box)
 		
-		preview_box.append(camera_control_box)
-		
-		# D-Bus connection status
+		# D-Bus status
 		if self.connected:
 			self.status_label = Gtk.Label(label="D-Bus: Connected")
 			self.status_label.add_css_class("success")
-			# Get initial camera state
 			try:
 				camera_active = self.dbus_client.get_camera_state()
+				self.camera_state_active = bool(camera_active)
 				self.camera_toggle.set_active(camera_active)
 				self.camera_toggle.set_label("Camera: ON" if camera_active else "Camera: OFF")
 			except Exception:
@@ -128,49 +153,41 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 			self.status_label = Gtk.Label(label="D-Bus: Not connected - Start camfx with --dbus")
 			self.status_label.add_css_class("error")
 			self.camera_toggle.set_sensitive(False)
+			self.camera_state_active = True
 		self.status_label.set_xalign(0)
-		preview_box.append(self.status_label)
+		page.append(self.status_label)
 		
-		self._build_camera_settings(preview_box)
-		
-		main_box.append(preview_box)
-		
-		# Right pane: Controls
-		control_pane = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-		control_pane.set_hexpand(True)
-		
-		# Effect chain widget
+		# Effect chain + controls
 		if self.connected:
 			self.effect_chain = EffectChainWidget(
 				self.dbus_client,
 				on_effect_selected=self._on_effect_selected
 			)
 		else:
-			# Show error message if not connected
 			self.effect_chain = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
 			error_label = Gtk.Label(label="Cannot connect to camfx service.\nPlease start camfx with --dbus flag.")
 			error_label.set_wrap(True)
 			error_label.add_css_class("error")
 			self.effect_chain.append(error_label)
+		page.append(self.effect_chain)
 		
-		control_pane.append(self.effect_chain)
-		
-		# Separator
 		separator = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
-		control_pane.append(separator)
+		page.append(separator)
 		
-		# Effect parameter controls
 		self.effect_controls = EffectControlsWidget(
 			on_update=self._on_parameter_update,
 			on_apply=self._on_apply_changes,
 			application=self.get_application()
 		)
-		control_pane.append(self.effect_controls)
+		page.append(self.effect_controls)
 		
-		main_box.append(control_pane)
-		
-		if self.connected:
-			GLib.idle_add(self._load_initial_camera_data)
+		return page
+	
+	def _initialize_preview_state(self):
+		"""Initial synchronization of preview widgets."""
+		self._update_direct_preview_config()
+		self._sync_direct_preview()
+		self._sync_preview_widget()
 	
 	def _build_camera_settings(self, parent: Gtk.Box):
 		"""Create camera source/resolution/fps selectors."""
@@ -254,6 +271,7 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 			return False
 		try:
 			self.current_camera_config = self.dbus_client.get_camera_config()
+			self._update_direct_preview_config()
 		except Exception as e:
 			self.current_camera_config = None
 			self._update_camera_settings_status(f"Failed to fetch camera config: {e}")
@@ -473,8 +491,9 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 				self.current_camera_config = config
 				self._update_camera_settings_status("Camera settings applied")
 				self._update_camera_apply_button_state()
-				if self.preview_toggle.get_active() and hasattr(self, 'preview_widget'):
-					self.preview_widget.restart_preview()
+				self._update_direct_preview_config()
+				self._sync_direct_preview()
+				self._sync_preview_widget(restart=self.camera_state_active or not self.connected)
 			else:
 				self._update_camera_settings_status("Failed to apply camera settings")
 		except Exception as e:
@@ -524,8 +543,9 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 			'fps': int(fps),
 		}
 		self._sync_camera_controls()
-		if self.preview_toggle.get_active() and hasattr(self, 'preview_widget'):
-			self.preview_widget.restart_preview()
+		self._update_direct_preview_config()
+		self._sync_direct_preview()
+		self._sync_preview_widget(restart=self.camera_state_active or not self.connected)
 		return False
 	
 	def _on_effect_selected(self, effect_type: str, config: Dict[str, Any]):
@@ -590,8 +610,13 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 		Args:
 			is_active: True if camera is active
 		"""
-		# Update toggle button state (without triggering the callback)
-		GLib.idle_add(self._update_camera_toggle, is_active)
+		GLib.idle_add(self._handle_camera_state_change, is_active)
+	
+	def _handle_camera_state_change(self, is_active: bool):
+		"""Sync UI controls when camera state changes."""
+		self.camera_state_active = bool(is_active)
+		self._update_camera_toggle(is_active)
+		self._sync_preview_widget()
 	
 	def _on_camera_config_changed(self, source_id: str, width: int, height: int, fps: int):
 		"""Handle camera configuration changes from D-Bus."""
@@ -619,6 +644,7 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 				success = self.dbus_client.start_camera()
 				if success:
 					button.set_label("Camera: ON")
+					self._handle_camera_state_change(True)
 				else:
 					button.set_active(False)
 					self._show_error("Failed to start camera")
@@ -626,6 +652,7 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 				success = self.dbus_client.stop_camera()
 				if success:
 					button.set_label("Camera: OFF")
+					self._handle_camera_state_change(False)
 				else:
 					button.set_active(True)
 					self._show_error("Failed to stop camera")
@@ -643,19 +670,57 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 		"""
 		is_active = button.get_active()
 		try:
-			if is_active:
-				if hasattr(self, 'preview_widget'):
-					self.preview_widget.start_preview()
-				button.set_label("Preview: ON")
-			else:
-				if hasattr(self, 'preview_widget'):
-					self.preview_widget.stop_preview()
-				button.set_label("Preview: OFF")
+			button.set_label("Preview: ON" if is_active else "Preview: OFF")
+			self._sync_preview_widget(restart=is_active and (self.camera_state_active or not self.connected))
 		except Exception as e:
-			# Revert toggle state on error
 			button.set_active(not is_active)
 			button.set_label("Preview: ON" if button.get_active() else "Preview: OFF")
 			self._show_error(f"Error toggling preview: {e}")
+	
+	def _on_direct_preview_toggled(self, button: Gtk.ToggleButton):
+		"""Handle direct preview toggle click."""
+		is_active = button.get_active()
+		button.set_label("Direct Preview: ON" if is_active else "Direct Preview: OFF")
+		self._sync_direct_preview()
+	
+	def _sync_preview_widget(self, restart: bool = False):
+		"""Ensure preview widget matches toggle and camera state."""
+		if not hasattr(self, 'preview_widget'):
+			return
+		
+		if not self.preview_toggle.get_active():
+			self.preview_widget.show_preview_disabled_message()
+			return
+		
+		if self.connected and not self.camera_state_active:
+			self.preview_widget.show_camera_inactive_message()
+			return
+		
+		try:
+			if restart and self.preview_widget.is_running():
+				self.preview_widget.restart_preview()
+			elif not self.preview_widget.is_running():
+				self.preview_widget.start_preview()
+		except Exception as e:
+			self._show_error(f"Failed to start preview: {e}")
+	
+	def _sync_direct_preview(self):
+		"""Ensure direct preview matches toggle and camera config."""
+		if not hasattr(self, 'direct_preview_widget'):
+			return
+		if not self.direct_preview_toggle.get_active():
+			self.direct_preview_widget.stop_preview()
+			return
+		if not self.current_camera_config:
+			self.direct_preview_widget.set_camera_config(None)
+			return
+		self.direct_preview_widget.set_camera_config(self.current_camera_config)
+		if not self.direct_preview_widget.is_running():
+			self.direct_preview_widget.start_preview()
+	
+	def _update_direct_preview_config(self):
+		if hasattr(self, 'direct_preview_widget'):
+			self.direct_preview_widget.set_camera_config(self.current_camera_config)
 	
 	def _show_error(self, message: str):
 		"""Show error message dialog."""

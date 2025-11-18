@@ -69,6 +69,14 @@ class PipeWireOutput:
 		if not wireplumber_available:
 			print(f"Warning: {wireplumber_status}. Virtual camera may not work.", file=sys.stderr)
 			print("To start wireplumber: systemctl --user start wireplumber", file=sys.stderr)
+		logger.info(
+			"Creating PipeWireOutput name=%s resolution=%sx%s@%sfps (wireplumber=%s)",
+			name,
+			width,
+			height,
+			fps,
+			wireplumber_status,
+		)
 		
 		Gst.init(None)
 		self.width = width
@@ -78,6 +86,9 @@ class PipeWireOutput:
 		self.frame_time = 1.0 / fps
 		self.pipeline: Optional[Gst.Pipeline] = None
 		self.appsrc: Optional[Gst.Element] = None
+		self._bus: Optional[Gst.Bus] = None
+		self._frames_sent = 0
+		self._last_send_log = 0.0
 
 		# Create GStreamer pipeline
 		# pipewiresink needs media.class=Video/Source to create a virtual camera source
@@ -88,11 +99,13 @@ class PipeWireOutput:
 			f'videoconvert ! '
 			f'pipewiresink name=sink'
 		)
+		logger.debug("GStreamer pipeline description: %s", pipeline_str)
 
 		try:
 			self.pipeline = Gst.parse_launch(pipeline_str)
 			if self.pipeline is None:
 				raise RuntimeError("Failed to parse GStreamer pipeline")
+			logger.debug("GStreamer pipeline parsed successfully")
 
 			self.appsrc = self.pipeline.get_by_name('source')
 			if self.appsrc is None:
@@ -101,10 +114,12 @@ class PipeWireOutput:
 			sink = self.pipeline.get_by_name('sink')
 			if sink is None:
 				raise RuntimeError("Failed to get pipewiresink element from pipeline")
+			logger.debug("Located appsrc=%s and pipewiresink=%s", self.appsrc, sink)
 			
 			# Get message bus to capture errors before state change
 			bus = self.pipeline.get_bus()
 			bus.add_signal_watch()
+			self._bus = bus
 			
 			# Ensure pipeline is in NULL state for property setting
 			self.pipeline.set_state(Gst.State.NULL)
@@ -125,12 +140,14 @@ class PipeWireOutput:
 			
 			# Set the stream-properties property
 			sink.set_property("stream-properties", stream_props)
+			logger.debug("pipewiresink stream-properties set for media.name=%s", name)
 			
 			# Now start pipeline directly - GStreamer will handle state transitions
 			ret = self.pipeline.set_state(Gst.State.PLAYING)
 			if ret == Gst.StateChangeReturn.FAILURE:
 				error_msg = self._get_pipeline_error()
 				raise RuntimeError(f"Failed to start GStreamer pipeline: {error_msg}")
+			logger.info("Requested PIPELINE→PLAYING state change (ret=%s)", ret)
 			
 			# For live appsrc pipelines, we may need to push an initial buffer
 			# to help the pipeline transition to PLAYING state
@@ -145,9 +162,10 @@ class PipeWireOutput:
 					dummy_buffer.duration = int(Gst.SECOND / self.fps)
 					# Try to push - this may help pipeline start
 					self.appsrc.emit('push-buffer', dummy_buffer)
-			except Exception:
+					logger.debug("Pushed dummy buffer to kick pipeline")
+			except Exception as exc:
 				# Ignore errors on dummy buffer push - pipeline should still work
-				pass
+				logger.debug("Dummy buffer push failed during startup: %s", exc)
 			
 			if ret == Gst.StateChangeReturn.ASYNC:
 				# Wait for state change to complete with a timeout (5 seconds)
@@ -245,6 +263,7 @@ class PipeWireOutput:
 					print(f"  1. Enable PipeWire support: chrome://flags/#enable-webrtc-pipewire-capturer", file=sys.stderr)
 					print(f"  2. Or launch with: --enable-features=WebRTCPipeWireCapturer", file=sys.stderr)
 					print(f"  3. Verify camera appears in: chrome://settings/content/camera", file=sys.stderr)
+					logger.info("PipeWire virtual camera '%s' is PLAYING", name)
 
 	def send(self, frame_rgb: bytes) -> None:
 		"""Send RGB frame data to PipeWire.
@@ -289,6 +308,19 @@ class PipeWireOutput:
 			else:
 				logger.error(f"Failed to push buffer: {ret}")
 				raise RuntimeError(f"Failed to push buffer: {ret}")
+		
+		self._frames_sent += 1
+		now = time.time()
+		if self._frames_sent == 1 or now - self._last_send_log >= 5.0:
+			logger.debug(
+				"Pushed frame #%s to PipeWire (%sx%s, fps=%s). Pipeline state=%s",
+				self._frames_sent,
+				self.width,
+				self.height,
+				self.fps,
+				self._describe_pipeline_state(),
+			)
+			self._last_send_log = now
 
 	def sleep_until_next_frame(self) -> None:
 		"""Maintain target frame rate by sleeping if necessary."""
@@ -391,10 +423,20 @@ class PipeWireOutput:
 			return f"Warning: {warn.message} (Debug: {debug})"
 		
 		return ""
+	
+	def _describe_pipeline_state(self) -> str:
+		"""Return a short description of the current pipeline state."""
+		if self.pipeline is None:
+			return "NONE"
+		state_ret = self.pipeline.get_state(0)
+		if len(state_ret) > 1:
+			return self._get_state_name(state_ret[1])
+		return "UNKNOWN"
 
 	def cleanup(self) -> None:
 		"""Stop and cleanup GStreamer pipeline."""
 		if self.pipeline is not None:
+			logger.info("Cleaning up PipeWireOutput (frames_sent=%s)", self._frames_sent)
 			# Remove bus watch before stopping
 			bus = self.pipeline.get_bus()
 			if bus:
@@ -402,4 +444,5 @@ class PipeWireOutput:
 			self.pipeline.set_state(Gst.State.NULL)
 			self.pipeline = None
 			self.appsrc = None
+			self._bus = None
 
