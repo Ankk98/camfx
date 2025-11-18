@@ -81,16 +81,27 @@ class PreviewWidget(Gtk.Box):
 		"""Stop preview thread."""
 		logger.info("Stopping preview")
 		self.running = False
-		if self.preview_thread:
-			self.preview_thread.join(timeout=2.0)
-			if self.preview_thread.is_alive():
-				logger.warning("Preview thread did not stop within timeout")
-			else:
-				logger.debug("Preview thread stopped")
 		if self.pipewire_input:
 			self.pipewire_input.release()
 			self.pipewire_input = None
 			logger.debug("PipeWireInput released")
+		if self.preview_thread:
+			self.preview_thread.join(timeout=2.0)
+			if self.preview_thread.is_alive():
+				logger.warning("Preview thread did not stop within timeout")
+				# Give thread a bit more time before detaching
+				self.preview_thread.join(timeout=1.0)
+				if self.preview_thread.is_alive():
+					logger.error("Preview thread stuck; continuing shutdown")
+			else:
+				logger.debug("Preview thread stopped")
+			self.preview_thread = None
+	
+	def restart_preview(self):
+		"""Restart preview with current source."""
+		logger.info("Restarting preview")
+		self.stop_preview()
+		self.start_preview()
 	
 	def _preview_loop(self):
 		"""Preview loop running in separate thread."""

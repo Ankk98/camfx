@@ -261,6 +261,65 @@ if DBUS_AVAILABLE:
 				print(f"Error getting camera state: {e}")
 				return False
 		
+		@dbus.service.method(INTERFACE_NAME, out_signature='a(ss)')
+		def ListCameraSources(self):
+			"""List available camera sources."""
+			if not self.video_enhancer:
+				return []
+			try:
+				sources = self.video_enhancer.list_camera_sources()
+				return [(source['id'], source['label']) for source in sources]
+			except Exception as e:
+				print(f"Error listing camera sources: {e}")
+				return []
+		
+		@dbus.service.method(INTERFACE_NAME, in_signature='s', out_signature='a(uuai)')
+		def GetCameraModes(self, source_id: str):
+			"""Get supported modes for a given source."""
+			if not self.video_enhancer:
+				return []
+			try:
+				modes = self.video_enhancer.get_camera_modes(source_id)
+				return [
+					(int(mode.get('width', 0)), int(mode.get('height', 0)),
+					 [int(fps) for fps in mode.get('fps', [])])
+					for mode in modes
+				]
+			except Exception as e:
+				print(f"Error getting camera modes: {e}")
+				return []
+		
+		@dbus.service.method(INTERFACE_NAME, out_signature='suuu')
+		def GetCameraConfig(self):
+			"""Return the current camera configuration."""
+			if not self.video_enhancer:
+				return ("", 0, 0, 0)
+			try:
+				config = self.video_enhancer.get_camera_config()
+				return (
+					str(config.get('source_id', '')),
+					int(config.get('width', 0)),
+					int(config.get('height', 0)),
+					int(config.get('fps', 0)),
+				)
+			except Exception as e:
+				print(f"Error getting camera config: {e}")
+				return ("", 0, 0, 0)
+		
+		@dbus.service.method(INTERFACE_NAME, in_signature='suuu', out_signature='b')
+		def ApplyCameraConfig(self, source_id: str, width: int, height: int, fps: int) -> bool:
+			"""Apply a new camera source/resolution/fps configuration."""
+			if not self.video_enhancer:
+				return False
+			try:
+				success = self.video_enhancer.apply_camera_config(source_id, int(width), int(height), int(fps))
+				if success:
+					self.CameraConfigChanged(source_id, int(width), int(height), int(fps))
+				return success
+			except Exception as e:
+				print(f"Error applying camera config: {e}")
+				return False
+		
 		@dbus.service.signal(INTERFACE_NAME, signature='b')
 		def CameraStateChanged(self, is_active: bool):
 			"""Signal emitted when camera state changes.
@@ -268,6 +327,11 @@ if DBUS_AVAILABLE:
 			Args:
 				is_active: True if camera is now active, False if inactive
 			"""
+			pass
+		
+		@dbus.service.signal(INTERFACE_NAME, signature='suuu')
+		def CameraConfigChanged(self, source_id: str, width: int, height: int, fps: int):
+			"""Signal emitted when camera configuration changes."""
 			pass
 
 

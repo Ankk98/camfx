@@ -55,6 +55,11 @@ class CamfxDBusClient:
 				self._on_camera_state_changed,
 				dbus_interface=self.INTERFACE_NAME
 			)
+			self.service.connect_to_signal(
+				'CameraConfigChanged',
+				self._on_camera_config_changed,
+				dbus_interface=self.INTERFACE_NAME
+			)
 		except Exception as e:
 			# Signals may not be available if service is not running
 			pass
@@ -69,18 +74,26 @@ class CamfxDBusClient:
 		# This will be overridden by signal handlers set via connect_signals
 		pass
 	
+	def _on_camera_config_changed(self, source_id: str, width: int, height: int, fps: int):
+		"""Internal callback for camera configuration changes."""
+		pass
+	
 	def connect_signals(self, on_effect_changed: Optional[Callable] = None,
-	                   on_camera_state_changed: Optional[Callable] = None):
+	                   on_camera_state_changed: Optional[Callable] = None,
+	                   on_camera_config_changed: Optional[Callable] = None):
 		"""Connect signal handlers.
 		
 		Args:
 			on_effect_changed: Callback(action, effect_type, config)
 			on_camera_state_changed: Callback(is_active)
+			on_camera_config_changed: Callback(source_id, width, height, fps)
 		"""
 		if on_effect_changed:
 			self._on_effect_changed = on_effect_changed
 		if on_camera_state_changed:
 			self._on_camera_state_changed = on_camera_state_changed
+		if on_camera_config_changed:
+			self._on_camera_config_changed = on_camera_config_changed
 	
 	def get_current_effects(self) -> List[tuple]:
 		"""Get current effect chain.
@@ -221,6 +234,57 @@ class CamfxDBusClient:
 		"""
 		try:
 			return self.control.GetCameraState()
+		except dbus.exceptions.DBusException as e:
+			raise ConnectionError(f"D-Bus error: {e}")
+	
+	def list_camera_sources(self) -> List[Dict[str, str]]:
+		"""List available camera sources."""
+		if not self.control:
+			return []
+		try:
+			result = self.control.ListCameraSources()
+			return [{'id': str(item[0]), 'label': str(item[1])} for item in result]
+		except dbus.exceptions.DBusException as e:
+			raise ConnectionError(f"D-Bus error: {e}")
+	
+	def get_camera_modes(self, source_id: str) -> List[Dict[str, Any]]:
+		"""Get supported modes for a camera source."""
+		if not self.control:
+			return []
+		try:
+			result = self.control.GetCameraModes(source_id)
+			modes = []
+			for width, height, fps_list in result:
+				modes.append({
+					'width': int(width),
+					'height': int(height),
+					'fps': [int(fps) for fps in fps_list]
+				})
+			return modes
+		except dbus.exceptions.DBusException as e:
+			raise ConnectionError(f"D-Bus error: {e}")
+	
+	def get_camera_config(self) -> Dict[str, Any]:
+		"""Fetch the current camera configuration."""
+		if not self.control:
+			return {'source_id': '', 'width': 0, 'height': 0, 'fps': 0}
+		try:
+			source_id, width, height, fps = self.control.GetCameraConfig()
+			return {
+				'source_id': str(source_id),
+				'width': int(width),
+				'height': int(height),
+				'fps': int(fps),
+			}
+		except dbus.exceptions.DBusException as e:
+			raise ConnectionError(f"D-Bus error: {e}")
+	
+	def apply_camera_config(self, source_id: str, width: int, height: int, fps: int) -> bool:
+		"""Apply a new camera configuration."""
+		if not self.control:
+			return False
+		try:
+			return self.control.ApplyCameraConfig(source_id, int(width), int(height), int(fps))
 		except dbus.exceptions.DBusException as e:
 			raise ConnectionError(f"D-Bus error: {e}")
 

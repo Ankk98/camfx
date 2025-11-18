@@ -1,6 +1,6 @@
 """Main window for camfx control panel."""
 
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Gdk', '4.0')
@@ -33,7 +33,8 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 			self.dbus_client = CamfxDBusClient()
 			self.dbus_client.connect_signals(
 				on_effect_changed=self._on_effect_changed,
-				on_camera_state_changed=self._on_camera_state_changed
+				on_camera_state_changed=self._on_camera_state_changed,
+				on_camera_config_changed=self._on_camera_config_changed
 			)
 			self.connected = True
 		except Exception as e:
@@ -46,6 +47,12 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 		# Current selected effect
 		self.selected_effect_type: Optional[str] = None
 		self.selected_effect_config: Optional[Dict[str, Any]] = None
+		
+		# Camera configuration state
+		self.camera_sources: List[Dict[str, Any]] = []
+		self.camera_modes_cache: Dict[str, List[Dict[str, Any]]] = {}
+		self.current_camera_config: Optional[Dict[str, Any]] = None
+		self._camera_controls_busy = False
 		
 		# Build UI
 		try:
@@ -124,6 +131,8 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 		self.status_label.set_xalign(0)
 		preview_box.append(self.status_label)
 		
+		self._build_camera_settings(preview_box)
+		
 		main_box.append(preview_box)
 		
 		# Right pane: Controls
@@ -159,6 +168,365 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 		control_pane.append(self.effect_controls)
 		
 		main_box.append(control_pane)
+		
+		if self.connected:
+			GLib.idle_add(self._load_initial_camera_data)
+	
+	def _build_camera_settings(self, parent: Gtk.Box):
+		"""Create camera source/resolution/fps selectors."""
+		settings_frame = Gtk.Frame()
+		settings_frame.set_label("Camera Settings")
+		settings_frame.set_margin_start(5)
+		settings_frame.set_margin_end(5)
+		parent.append(settings_frame)
+		
+		settings_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+		settings_box.set_margin_start(10)
+		settings_box.set_margin_end(10)
+		settings_box.set_margin_top(10)
+		settings_box.set_margin_bottom(10)
+		settings_frame.set_child(settings_box)
+		
+		def build_row(title: str) -> Gtk.Box:
+			row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+			label = Gtk.Label(label=title)
+			label.set_xalign(0)
+			label.set_hexpand(True)
+			row.append(label)
+			return row
+		
+		# Camera source dropdown
+		source_row = build_row("Source")
+		self.camera_source_store = Gtk.StringList()
+		self.camera_source_dropdown = Gtk.DropDown(model=self.camera_source_store)
+		self.camera_source_dropdown.set_hexpand(True)
+		self.camera_source_dropdown.set_sensitive(False)
+		self.camera_source_dropdown.connect("notify::selected", self._on_camera_source_changed)
+		source_row.append(self.camera_source_dropdown)
+		settings_box.append(source_row)
+		
+		# Resolution dropdown
+		res_row = build_row("Resolution")
+		self.camera_resolution_store = Gtk.StringList()
+		self.camera_resolution_dropdown = Gtk.DropDown(model=self.camera_resolution_store)
+		self.camera_resolution_dropdown.set_hexpand(True)
+		self.camera_resolution_dropdown.set_sensitive(False)
+		self.camera_resolution_dropdown.connect("notify::selected", self._on_resolution_changed)
+		res_row.append(self.camera_resolution_dropdown)
+		settings_box.append(res_row)
+		
+		# FPS dropdown
+		fps_row = build_row("Frame rate")
+		self.camera_fps_store = Gtk.StringList()
+		self.camera_fps_dropdown = Gtk.DropDown(model=self.camera_fps_store)
+		self.camera_fps_dropdown.set_hexpand(True)
+		self.camera_fps_dropdown.set_sensitive(False)
+		self.camera_fps_dropdown.connect("notify::selected", self._on_fps_changed)
+		fps_row.append(self.camera_fps_dropdown)
+		settings_box.append(fps_row)
+		
+		# Apply button
+		self.camera_apply_button = Gtk.Button(label="Apply Settings")
+		self.camera_apply_button.set_sensitive(False)
+		self.camera_apply_button.connect("clicked", self._on_apply_camera_settings)
+		settings_box.append(self.camera_apply_button)
+		
+		# Status label
+		self.camera_settings_status = Gtk.Label(label="Camera controls require camfx service")
+		self.camera_settings_status.set_xalign(0)
+		settings_box.append(self.camera_settings_status)
+	
+	def _refresh_string_list(self, dropdown: Gtk.DropDown, items: List[str]) -> Gtk.StringList:
+		store = Gtk.StringList()
+		for item in items:
+			store.append(item)
+		dropdown.set_model(store)
+		if items:
+			dropdown.set_selected(0)
+		else:
+			dropdown.set_selected(Gtk.INVALID_LIST_POSITION)
+		return store
+	
+	def _load_initial_camera_data(self):
+		"""Fetch initial camera configuration and available sources."""
+		if not self.connected or not self.dbus_client:
+			self._clear_camera_dropdowns("camfx service not connected")
+			return False
+		try:
+			self.current_camera_config = self.dbus_client.get_camera_config()
+		except Exception as e:
+			self.current_camera_config = None
+			self._update_camera_settings_status(f"Failed to fetch camera config: {e}")
+		self._refresh_camera_sources()
+		return False
+	
+	def _refresh_camera_sources(self):
+		"""Refresh camera source list from D-Bus."""
+		if not self.dbus_client:
+			self._clear_camera_dropdowns("camfx service unavailable")
+			return
+		try:
+			sources = self.dbus_client.list_camera_sources()
+		except Exception as e:
+			self._clear_camera_dropdowns(f"Failed to load cameras: {e}")
+			return
+		
+		self.camera_sources = sources
+		self.camera_source_store = self._refresh_string_list(
+			self.camera_source_dropdown,
+			[source['label'] for source in sources]
+		)
+		
+		if not sources:
+			self.camera_source_dropdown.set_sensitive(False)
+			self.camera_resolution_dropdown.set_sensitive(False)
+			self.camera_fps_dropdown.set_sensitive(False)
+			self.camera_apply_button.set_sensitive(False)
+			self._update_camera_settings_status("No camera sources detected")
+			return
+		
+		self.camera_source_dropdown.set_sensitive(True)
+		target_id = self.current_camera_config.get('source_id') if self.current_camera_config else None
+		selected_index = 0
+		if target_id:
+			for idx, source in enumerate(sources):
+				if source['id'] == target_id:
+					selected_index = idx
+					break
+		self._set_dropdown_selection(self.camera_source_dropdown, selected_index)
+		self._load_modes_for_source(sources[selected_index]['id'])
+	
+	def _load_modes_for_source(self, source_id: str):
+		"""Load and display resolution/fps combos for a source."""
+		modes = self.camera_modes_cache.get(source_id)
+		if modes is None:
+			if not self.dbus_client:
+				return
+			try:
+				modes = self.dbus_client.get_camera_modes(source_id)
+			except Exception as e:
+				self._update_camera_settings_status(f"Failed to load modes: {e}")
+				self._clear_resolution_and_fps()
+				return
+			self.camera_modes_cache[source_id] = modes
+		self._populate_resolution_dropdown(source_id, modes)
+	
+	def _clear_resolution_and_fps(self):
+		self.camera_resolution_store = self._refresh_string_list(self.camera_resolution_dropdown, [])
+		self.camera_fps_store = self._refresh_string_list(self.camera_fps_dropdown, [])
+		self.camera_resolution_dropdown.set_sensitive(False)
+		self.camera_fps_dropdown.set_sensitive(False)
+		self.camera_apply_button.set_sensitive(False)
+	
+	def _populate_resolution_dropdown(self, source_id: str, modes: List[Dict[str, Any]]):
+		labels = [f"{mode.get('width', 0)} x {mode.get('height', 0)}" for mode in modes]
+		self.camera_resolution_store = self._refresh_string_list(self.camera_resolution_dropdown, labels)
+		if not labels:
+			self._clear_resolution_and_fps()
+			self._update_camera_settings_status("No supported modes for selected camera")
+			return
+		
+		self.camera_resolution_dropdown.set_sensitive(True)
+		target = None
+		if self.current_camera_config and self.current_camera_config.get('source_id') == source_id:
+			target = (
+				self.current_camera_config.get('width'),
+				self.current_camera_config.get('height')
+			)
+		
+		selected_index = 0
+		if target:
+			for idx, mode in enumerate(modes):
+				if int(mode.get('width', 0)) == int(target[0]) and int(mode.get('height', 0)) == int(target[1]):
+					selected_index = idx
+					break
+		self._set_dropdown_selection(self.camera_resolution_dropdown, selected_index)
+		self._populate_fps_dropdown(source_id, modes, selected_index)
+	
+	def _populate_fps_dropdown(self, source_id: str, modes: List[Dict[str, Any]], mode_index: int):
+		if mode_index < 0 or mode_index >= len(modes):
+			self._clear_resolution_and_fps()
+			return
+		
+		mode = modes[mode_index]
+		fps_values = [int(fps) for fps in mode.get('fps', [])]
+		fps_labels = [f"{fps} fps" for fps in fps_values]
+		self.camera_fps_store = self._refresh_string_list(self.camera_fps_dropdown, fps_labels)
+		
+		if not fps_values:
+			self.camera_fps_dropdown.set_sensitive(False)
+			self.camera_apply_button.set_sensitive(False)
+			self._update_camera_settings_status("No frame rates available for selected resolution")
+			return
+		
+		self.camera_fps_dropdown.set_sensitive(True)
+		target_fps = None
+		if (self.current_camera_config and
+		    self.current_camera_config.get('source_id') == source_id and
+		    int(self.current_camera_config.get('width', 0)) == int(mode.get('width', 0)) and
+		    int(self.current_camera_config.get('height', 0)) == int(mode.get('height', 0))):
+			target_fps = int(self.current_camera_config.get('fps', 0))
+		
+		selected_index = 0
+		if target_fps:
+			for idx, fps in enumerate(fps_values):
+				if fps == target_fps:
+					selected_index = idx
+					break
+		self._set_dropdown_selection(self.camera_fps_dropdown, selected_index)
+		self._update_camera_apply_button_state()
+	
+	def _on_camera_source_changed(self, dropdown: Gtk.DropDown, _param):
+		if self._camera_controls_busy:
+			return
+		index = dropdown.get_selected()
+		if index is None or index < 0 or index >= len(self.camera_sources):
+			self._clear_resolution_and_fps()
+			return
+		source_id = self.camera_sources[index]['id']
+		self._load_modes_for_source(source_id)
+		self._update_camera_apply_button_state()
+	
+	def _on_resolution_changed(self, dropdown: Gtk.DropDown, _param):
+		if self._camera_controls_busy:
+			return
+		source_index = self.camera_source_dropdown.get_selected()
+		if source_index is None or source_index < 0 or source_index >= len(self.camera_sources):
+			self._clear_resolution_and_fps()
+			return
+		mode_index = dropdown.get_selected()
+		source_id = self.camera_sources[source_index]['id']
+		modes = self.camera_modes_cache.get(source_id, [])
+		if mode_index is None or mode_index < 0 or mode_index >= len(modes):
+			self._clear_resolution_and_fps()
+			return
+		self._populate_fps_dropdown(source_id, modes, mode_index)
+	
+	def _on_fps_changed(self, dropdown: Gtk.DropDown, _param):
+		if self._camera_controls_busy:
+			return
+		if dropdown.get_selected() is None or dropdown.get_selected() < 0:
+			self.camera_apply_button.set_sensitive(False)
+			return
+		self._update_camera_apply_button_state()
+	
+	def _get_selected_camera_config(self) -> Optional[Dict[str, Any]]:
+		source_index = self.camera_source_dropdown.get_selected()
+		if source_index is None or source_index < 0 or source_index >= len(self.camera_sources):
+			return None
+		source = self.camera_sources[source_index]
+		modes = self.camera_modes_cache.get(source['id'])
+		if not modes:
+			return None
+		res_index = self.camera_resolution_dropdown.get_selected()
+		if res_index is None or res_index < 0 or res_index >= len(modes):
+			return None
+		mode = modes[res_index]
+		fps_values = [int(fps) for fps in mode.get('fps', [])]
+		fps_index = self.camera_fps_dropdown.get_selected()
+		if fps_index is None or fps_index < 0 or fps_index >= len(fps_values):
+			return None
+		return {
+			'source_id': source['id'],
+			'width': int(mode.get('width', 0)),
+			'height': int(mode.get('height', 0)),
+			'fps': int(fps_values[fps_index]),
+		}
+	
+	def _update_camera_apply_button_state(self):
+		if not hasattr(self, 'camera_apply_button'):
+			return
+		if not self.connected or not self.dbus_client:
+			self.camera_apply_button.set_sensitive(False)
+			return
+		selected = self._get_selected_camera_config()
+		if not selected:
+			self.camera_apply_button.set_sensitive(False)
+			return
+		if not self.current_camera_config:
+			self.camera_apply_button.set_sensitive(True)
+			return
+		is_same = (
+			self.current_camera_config.get('source_id') == selected['source_id'] and
+			int(self.current_camera_config.get('width', 0)) == selected['width'] and
+			int(self.current_camera_config.get('height', 0)) == selected['height'] and
+			int(self.current_camera_config.get('fps', 0)) == selected['fps']
+		)
+		self.camera_apply_button.set_sensitive(not is_same)
+	
+	def _on_apply_camera_settings(self, _button):
+		if not self.connected or not self.dbus_client:
+			self._update_camera_settings_status("camfx service not connected")
+			return
+		config = self._get_selected_camera_config()
+		if not config:
+			self._update_camera_settings_status("Select source, resolution, and fps before applying")
+			return
+		try:
+			success = self.dbus_client.apply_camera_config(
+				config['source_id'],
+				config['width'],
+				config['height'],
+				config['fps']
+			)
+			if success:
+				self.current_camera_config = config
+				self._update_camera_settings_status("Camera settings applied")
+				self._update_camera_apply_button_state()
+				if self.preview_toggle.get_active() and hasattr(self, 'preview_widget'):
+					self.preview_widget.restart_preview()
+			else:
+				self._update_camera_settings_status("Failed to apply camera settings")
+		except Exception as e:
+			self._update_camera_settings_status(f"Error applying camera settings: {e}")
+			self._show_error(f"Error applying camera settings: {e}")
+	
+	def _update_camera_settings_status(self, message: str):
+		if hasattr(self, 'camera_settings_status') and self.camera_settings_status:
+			self.camera_settings_status.set_text(message)
+	
+	def _clear_camera_dropdowns(self, message: str):
+		self.camera_sources = []
+		self.camera_modes_cache.clear()
+		self.camera_source_store = self._refresh_string_list(self.camera_source_dropdown, [])
+		self._clear_resolution_and_fps()
+		self.camera_source_dropdown.set_sensitive(False)
+		self._update_camera_settings_status(message)
+	
+	def _set_dropdown_selection(self, dropdown: Gtk.DropDown, index: int):
+		self._camera_controls_busy = True
+		try:
+			if index >= 0:
+				dropdown.set_selected(index)
+			else:
+				dropdown.set_selected(Gtk.INVALID_LIST_POSITION)
+		finally:
+			self._camera_controls_busy = False
+	
+	def _sync_camera_controls(self):
+		if not self.camera_sources or not self.current_camera_config:
+			return
+		target_id = self.current_camera_config.get('source_id')
+		if not target_id:
+			return
+		for idx, source in enumerate(self.camera_sources):
+			if source['id'] == target_id:
+				self._set_dropdown_selection(self.camera_source_dropdown, idx)
+				self._load_modes_for_source(target_id)
+				break
+		self._update_camera_apply_button_state()
+	
+	def _handle_camera_config_changed(self, source_id: str, width: int, height: int, fps: int):
+		self.current_camera_config = {
+			'source_id': str(source_id),
+			'width': int(width),
+			'height': int(height),
+			'fps': int(fps),
+		}
+		self._sync_camera_controls()
+		if self.preview_toggle.get_active() and hasattr(self, 'preview_widget'):
+			self.preview_widget.restart_preview()
+		return False
 	
 	def _on_effect_selected(self, effect_type: str, config: Dict[str, Any]):
 		"""Handle effect selection from chain widget.
@@ -224,6 +592,10 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 		"""
 		# Update toggle button state (without triggering the callback)
 		GLib.idle_add(self._update_camera_toggle, is_active)
+	
+	def _on_camera_config_changed(self, source_id: str, width: int, height: int, fps: int):
+		"""Handle camera configuration changes from D-Bus."""
+		GLib.idle_add(self._handle_camera_config_changed, source_id, width, height, fps)
 	
 	def _update_camera_toggle(self, is_active: bool):
 		"""Update camera toggle button state without triggering callback."""

@@ -1,9 +1,12 @@
 import logging
+import os
+import threading
 import cv2
 import numpy as np
 import time
-from typing import Optional
+from typing import Dict, List, Optional
 
+from .camera_devices import list_camera_devices, probe_camera_modes
 from .segmentation import PersonSegmenter
 from .output_pipewire import PipeWireOutput
 from .control import EffectController
@@ -15,6 +18,10 @@ class VideoEnhancer:
 	def __init__(self, input_device: int = 0, effect_type: str = 'blur', config: dict | None = None) -> None:
 		self.input_device = input_device
 		self.config = config or {}
+		self.camera_lock = threading.RLock()
+		self.camera_source_id = self._normalize_source_id(input_device)
+		self.camera_source_index = self._source_id_to_index(self.camera_source_id)
+		self._capability_cache: Dict[str, List[Dict[str, object]]] = {}
 		
 		# Camera is not opened immediately - requires explicit start via D-Bus or CLI
 		self.cap: Optional[cv2.VideoCapture] = None
@@ -35,7 +42,7 @@ class VideoEnhancer:
 		# Get target dimensions and FPS from config
 		self.target_fps = int(self.config.get('fps', 30))
 		self.enable_virtual = bool(self.config.get('enable_virtual', True))
-		camera_name = self.config.get('camera_name', 'camfx')
+		self.camera_name = self.config.get('camera_name', 'camfx')
 		
 		# Use config dimensions or defaults
 		target_width = self.config.get('width')
@@ -46,23 +53,7 @@ class VideoEnhancer:
 		
 		# Virtual camera output via PipeWire (always initialize, even if camera not active)
 		self.virtual_cam = None
-		if self.enable_virtual:
-			try:
-				print(f"Initializing PipeWire virtual camera ({self.width}x{self.height} @ {self.target_fps}fps)...")
-				self.virtual_cam = PipeWireOutput(
-					width=self.width,
-					height=self.height,
-					fps=self.target_fps,
-					name=camera_name,
-				)
-				print("PipeWire virtual camera ready")
-			except Exception as exc:
-				print(f"Warning: Failed to initialize PipeWire virtual camera: {exc}")
-				print("Continuing with preview only. To enable virtual camera:")
-				print("  1. Ensure PipeWire is running: systemctl --user status pipewire")
-				print("  2. Ensure wireplumber is running: systemctl --user start wireplumber")
-				print("  3. Or use --no-virtual to skip virtual camera initialization")
-				self.virtual_cam = None
+		self._create_virtual_output()
 		
 		# Initialize D-Bus service if enabled
 		self.dbus_service = None
@@ -104,36 +95,167 @@ class VideoEnhancer:
 	
 	def _start_camera(self):
 		"""Start camera capture."""
-		if self.cap is not None:
-			return  # Already started
-		
-		self.cap = cv2.VideoCapture(self.input_device)
-		if not self.cap.isOpened():
-			self.cap = None
-			self.camera_active = False
-			return
-		
-		# Set resolution if specified
-		if 'width' in self.config and self.config['width'] is not None:
-			self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(self.config['width']))
-		if 'height' in self.config and self.config['height'] is not None:
-			self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(self.config['height']))
-		
-		# Update dimensions from actual camera
-		self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-		self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-		
-		self.camera_active = True
+		with self.camera_lock:
+			if self.cap is not None:
+				return  # Already started
+			
+			self.cap = self._open_capture_for_source()
+			if self.cap is None or not self.cap.isOpened():
+				if self.cap:
+					self.cap.release()
+				self.cap = None
+				self.camera_active = False
+				return
+			
+			# Set resolution if specified
+			if 'width' in self.config and self.config['width'] is not None:
+				self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(self.config['width']))
+			if 'height' in self.config and self.config['height'] is not None:
+				self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(self.config['height']))
+			
+			# Update dimensions from actual camera
+			self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+			self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+			
+			self.camera_active = True
 	
 	def _stop_camera(self):
 		"""Stop camera capture."""
-		if self.cap is None:
+		with self.camera_lock:
+			if self.cap is None:
+				self.camera_active = False
+				return
+			
+			self.cap.release()
+			self.cap = None
 			self.camera_active = False
+	
+	def _open_capture_for_source(self) -> Optional[cv2.VideoCapture]:
+		"""Create a VideoCapture for the current source."""
+		if self.camera_source_index is not None:
+			cap = cv2.VideoCapture(self.camera_source_index)
+			if cap and cap.isOpened():
+				return cap
+			if cap:
+				cap.release()
+		
+		cap = cv2.VideoCapture(self.camera_source_id)
+		if cap and cap.isOpened():
+			return cap
+		if cap:
+			cap.release()
+		return None
+	
+	def _create_virtual_output(self):
+		"""Initialize virtual camera output with current dimensions."""
+		if not self.enable_virtual:
 			return
 		
-		self.cap.release()
-		self.cap = None
-		self.camera_active = False
+		try:
+			print(f"Initializing PipeWire virtual camera ({self.width}x{self.height} @ {self.target_fps}fps)...")
+			self.virtual_cam = PipeWireOutput(
+				width=self.width,
+				height=self.height,
+				fps=self.target_fps,
+				name=self.camera_name,
+			)
+			print("PipeWire virtual camera ready")
+		except Exception as exc:
+			print(f"Warning: Failed to initialize PipeWire virtual camera: {exc}")
+			print("Continuing with preview only. To enable virtual camera:")
+			print("  1. Ensure PipeWire is running: systemctl --user status pipewire")
+			print("  2. Ensure wireplumber is running: systemctl --user start wireplumber")
+			print("  3. Or use --no-virtual to skip virtual camera initialization")
+			self.virtual_cam = None
+	
+	def _cleanup_virtual_output(self):
+		"""Release existing virtual camera pipeline."""
+		if self.virtual_cam is None:
+			return
+		try:
+			self.virtual_cam.cleanup()
+		except Exception as exc:
+			logger.error(f"Error cleaning up virtual camera: {exc}", exc_info=True)
+		finally:
+			self.virtual_cam = None
+	
+	def _recreate_virtual_output(self):
+		"""Recreate virtual camera pipeline with new dimensions."""
+		if not self.enable_virtual:
+			return
+		old_virtual = self.virtual_cam
+		self.virtual_cam = None
+		if old_virtual:
+			try:
+				old_virtual.cleanup()
+			except Exception as exc:
+				logger.error(f"Error cleaning up virtual camera: {exc}", exc_info=True)
+		self._create_virtual_output()
+	
+	def list_camera_sources(self) -> List[Dict[str, str]]:
+		"""Return available camera sources for selection."""
+		devices = list_camera_devices()
+		return [{'id': device.id, 'label': device.label} for device in devices]
+	
+	def get_camera_modes(self, source_id: str) -> List[Dict[str, object]]:
+		"""Return cached or probed modes for a camera source."""
+		if source_id in self._capability_cache:
+			return self._capability_cache[source_id]
+		modes = probe_camera_modes(source_id)
+		self._capability_cache[source_id] = modes
+		return modes
+	
+	def get_camera_config(self) -> Dict[str, int | str]:
+		"""Return current camera configuration."""
+		return {
+			'source_id': self.camera_source_id,
+			'width': int(self.width),
+			'height': int(self.height),
+			'fps': int(self.target_fps),
+		}
+	
+	def apply_camera_config(self, source_id: str, width: int, height: int, fps: int) -> bool:
+		"""Apply a new camera configuration."""
+		with self.camera_lock:
+			restart_camera = self.camera_active
+			self._stop_camera()
+			self.camera_source_id = self._normalize_source_id(source_id)
+			self.camera_source_index = self._source_id_to_index(self.camera_source_id)
+			self.config['width'] = width
+			self.config['height'] = height
+			self.config['fps'] = fps
+			self.width = width
+			self.height = height
+			self.target_fps = fps
+			self._recreate_virtual_output()
+			if restart_camera:
+				self._start_camera()
+		return True
+	
+	def _normalize_source_id(self, source: int | str) -> str:
+		"""Convert different source declarations into a canonical /dev path."""
+		if isinstance(source, str):
+			if source.startswith('/dev/'):
+				return source
+			if source.isdigit():
+				return f"/dev/video{source}"
+			return source
+		return f"/dev/video{source}"
+	
+	def _source_id_to_index(self, source_id: str) -> Optional[int]:
+		"""Extract numeric index from /dev/video style identifiers."""
+		basename = os.path.basename(str(source_id))
+		if basename.startswith('video'):
+			try:
+				return int(basename.replace('video', ''))
+			except ValueError:
+				return None
+		if basename.isdigit():
+			return int(basename)
+		try:
+			return int(source_id)
+		except ValueError:
+			return None
 	
 	def set_effect(self, effect_type: str, config: dict):
 		"""Change effect at runtime."""
