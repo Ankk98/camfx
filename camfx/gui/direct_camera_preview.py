@@ -66,6 +66,8 @@ class DirectCameraPreview(Gtk.Box):
 	
 	def stop_preview(self):
 		if not self._running:
+			# Still clear the picture even if not running
+			self.picture.set_pixbuf(None)
 			return
 		logger.info("Stopping direct preview")
 		self._running = False
@@ -74,7 +76,8 @@ class DirectCameraPreview(Gtk.Box):
 		self._thread = None
 		self._release_capture()
 		self._update_status("Preview: Camera is OFF")
-		self.picture.set_pixbuf(None)
+		# Clear the picture to show blank screen
+		GLib.idle_add(self.picture.set_pixbuf, None)
 	
 	def restart_preview(self):
 		self.stop_preview()
@@ -153,6 +156,9 @@ class DirectCameraPreview(Gtk.Box):
 			self._capture = None
 	
 	def _update_frame(self, frame: np.ndarray):
+		# Don't update if preview is stopped
+		if not self._running:
+			return
 		if frame is None:
 			return
 		try:
@@ -169,7 +175,9 @@ class DirectCameraPreview(Gtk.Box):
 				height,
 				width * 3
 			)
-			self.picture.set_pixbuf(pixbuf)
+			# Check again before setting pixbuf (in case stop was called while processing)
+			if self._running:
+				self.picture.set_pixbuf(pixbuf)
 		except Exception as exc:
 			logger.error("Error updating direct preview frame: %s", exc, exc_info=True)
 	

@@ -22,6 +22,7 @@ class EffectChainWidget(Gtk.Box):
 		self.dbus_client = dbus_client
 		self.on_effect_selected = on_effect_selected
 		self.effect_rows = []
+		self._last_selected_row = None  # Track last selected row for deselection
 		
 		self.set_margin_start(10)
 		self.set_margin_end(10)
@@ -44,6 +45,8 @@ class EffectChainWidget(Gtk.Box):
 		self.list_box = Gtk.ListBox()
 		self.list_box.set_selection_mode(Gtk.SelectionMode.SINGLE)
 		self.list_box.connect("row-selected", self._on_row_selected)
+		# Allow deselection by clicking selected row again
+		self.list_box.set_activate_on_single_click(False)
 		self.scrolled.set_child(self.list_box)
 		self.append(self.scrolled)
 		
@@ -62,10 +65,20 @@ class EffectChainWidget(Gtk.Box):
 	
 	def _refresh_chain(self):
 		"""Refresh effect chain from D-Bus service."""
-		# Clear existing rows
-		for row in self.effect_rows:
+		# Clear ALL existing rows from list_box (including empty/error rows)
+		# Get all children first, then remove them
+		children = []
+		child = self.list_box.get_first_child()
+		while child is not None:
+			children.append(child)
+			child = child.get_next_sibling()
+		
+		for row in children:
 			self.list_box.remove(row)
+		
+		# Clear effect_rows list and reset selection tracking
 		self.effect_rows.clear()
+		self._last_selected_row = None
 		
 		# Get current effects
 		try:
@@ -168,10 +181,24 @@ class EffectChainWidget(Gtk.Box):
 		return row
 	
 	def _on_row_selected(self, list_box: Gtk.ListBox, row: Optional[Gtk.ListBoxRow]):
-		"""Handle effect row selection."""
+		"""Handle effect row selection or deselection."""
 		if row and hasattr(row, 'effect_type'):
+			# If clicking the same row again, deselect it
+			if self._last_selected_row == row:
+				self.list_box.unselect_row(row)
+				self._last_selected_row = None
+				if self.on_effect_selected:
+					self.on_effect_selected(None, None)
+			else:
+				# New selection
+				self._last_selected_row = row
+				if self.on_effect_selected:
+					self.on_effect_selected(row.effect_type, row.effect_config)
+		else:
+			# Row deselected (None passed)
+			self._last_selected_row = None
 			if self.on_effect_selected:
-				self.on_effect_selected(row.effect_type, row.effect_config)
+				self.on_effect_selected(None, None)
 	
 	def _on_add_clicked(self, button: Gtk.Button):
 		"""Handle add effect button click."""
@@ -194,6 +221,10 @@ class EffectChainWidget(Gtk.Box):
 		try:
 			success = self.dbus_client.remove_effect(index)
 			if success:
+				# Clear selection before refreshing (will be handled by _on_effect_changed)
+				# but we also clear it here to ensure UI updates immediately
+				if self.on_effect_selected:
+					self.on_effect_selected(None, None)
 				self._refresh_chain()
 			else:
 				self._show_error("Failed to remove effect")
@@ -220,6 +251,9 @@ class EffectChainWidget(Gtk.Box):
 				try:
 					success = self.dbus_client.clear_chain()
 					if success:
+						# Clear selection when clearing all effects
+						if self.on_effect_selected:
+							self.on_effect_selected(None, None)
 						self._refresh_chain()
 					else:
 						self._show_error("Failed to clear effects")

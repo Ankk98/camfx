@@ -137,6 +137,8 @@ class PipeWireOutput:
 			stream_props.set_value("media.name", name)  # GstStructure handles spaces properly
 			# node.description is used by applications to display the camera name
 			stream_props.set_value("node.description", name)
+			# Ensure PipeWire node itself is named consistently
+			stream_props.set_value("node.name", name)
 			
 			# Set the stream-properties property
 			sink.set_property("stream-properties", stream_props)

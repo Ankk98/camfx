@@ -1,0 +1,3 @@
+include camfx/resources/*.jpg
+recursive-include camfx/resources *.jpg
+

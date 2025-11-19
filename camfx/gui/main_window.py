@@ -1,5 +1,8 @@
 """Main window for camfx control panel."""
 
+import logging
+import signal
+import sys
 from typing import Optional, Dict, Any, List
 import gi
 gi.require_version('Gtk', '4.0')
@@ -11,6 +14,8 @@ from .preview_widget import PreviewWidget
 from .effect_chain_widget import EffectChainWidget
 from .effect_controls import EffectControlsWidget
 from .direct_camera_preview import DirectCameraPreview
+
+logger = logging.getLogger('camfx.gui.main_window')
 
 
 class CamfxMainWindow(Gtk.ApplicationWindow):
@@ -64,6 +69,9 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 			traceback.print_exc()
 			raise
 		
+		# Register crash handlers to ensure camera is released
+		self._register_crash_handlers()
+		
 		# Sync previews (both default OFF)
 		self._initialize_preview_state()
 	
@@ -76,21 +84,48 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 		main_box.set_margin_bottom(10)
 		self.set_child(main_box)
 		
+		# Step indicator
+		step_label = Gtk.Label()
+		step_label.set_markup("<b>Step 1 of 2</b>")
+		step_label.set_margin_bottom(10)
+		self.step_label = step_label
+		main_box.append(step_label)
+		
+		# Stack for pages
 		self.stack = Gtk.Stack()
 		self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
 		self.stack.set_vexpand(True)
-		
-		switcher = Gtk.StackSwitcher()
-		switcher.set_stack(self.stack)
-		switcher.set_margin_bottom(6)
-		main_box.append(switcher)
 		main_box.append(self.stack)
 		
+		# Current step (1 or 2)
+		self.current_step = 1
+		
+		# Build pages
 		camera_setup_page = self._build_camera_setup_page()
 		virtual_preview_page = self._build_virtual_preview_page()
 		
-		self.stack.add_titled(camera_setup_page, "camera_setup", "Camera Setup")
-		self.stack.add_titled(virtual_preview_page, "virtual_preview", "Virtual Preview")
+		self.stack.add_named(camera_setup_page, "step1")
+		self.stack.add_named(virtual_preview_page, "step2")
+		
+		# Navigation buttons
+		nav_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+		nav_box.set_margin_top(10)
+		nav_box.set_halign(Gtk.Align.END)
+		
+		self.back_button = Gtk.Button(label="Back")
+		self.back_button.set_sensitive(False)  # Disabled on step 1
+		self.back_button.connect("clicked", self._on_back_clicked)
+		nav_box.append(self.back_button)
+		
+		self.next_button = Gtk.Button(label="Next")
+		self.next_button.add_css_class("suggested-action")
+		self.next_button.connect("clicked", self._on_next_clicked)
+		nav_box.append(self.next_button)
+		
+		main_box.append(nav_box)
+		
+		# Show step 1 initially
+		self.stack.set_visible_child_name("step1")
 		
 		if self.connected:
 			GLib.idle_add(self._load_initial_camera_data)
@@ -548,12 +583,12 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 		self._sync_preview_widget(restart=self.camera_state_active or not self.connected)
 		return False
 	
-	def _on_effect_selected(self, effect_type: str, config: Dict[str, Any]):
-		"""Handle effect selection from chain widget.
+	def _on_effect_selected(self, effect_type: Optional[str], config: Optional[Dict[str, Any]]):
+		"""Handle effect selection or deselection from chain widget.
 		
 		Args:
-			effect_type: Selected effect type
-			config: Effect configuration
+			effect_type: Selected effect type (None to deselect)
+			config: Effect configuration (None to deselect)
 		"""
 		self.selected_effect_type = effect_type
 		self.selected_effect_config = config
@@ -600,9 +635,17 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 		if hasattr(self, 'effect_chain') and isinstance(self.effect_chain, EffectChainWidget):
 			GLib.idle_add(self.effect_chain.refresh)
 		
-		# If this is the selected effect, update controls
-		if self.selected_effect_type == effect_type:
-			GLib.idle_add(self.effect_controls.update_effect, effect_type, config)
+		# Handle selection based on action
+		if action == 'remove' or action == 'clear':
+			# If the removed/cleared effect was selected, clear the selection
+			if self.selected_effect_type == effect_type or action == 'clear':
+				self.selected_effect_type = None
+				self.selected_effect_config = None
+				GLib.idle_add(self.effect_controls.update_effect, None, None)
+		elif action == 'update':
+			# If this is the selected effect, update controls
+			if self.selected_effect_type == effect_type:
+				GLib.idle_add(self.effect_controls.update_effect, effect_type, config)
 	
 	def _on_camera_state_changed(self, is_active: bool):
 		"""Handle camera state change signal from D-Bus.
@@ -738,11 +781,130 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 		dialog.connect("response", lambda d, r: d.destroy())
 		dialog.show()
 	
+	def _on_next_clicked(self, button: Gtk.Button):
+		"""Handle Next button click - move to step 2 or finish."""
+		if self.current_step == 1:
+			# Release step 1 resources (direct preview camera)
+			self._release_step1_resources()
+			# Move to step 2
+			self.current_step = 2
+			self.stack.set_visible_child_name("step2")
+			self.step_label.set_markup("<b>Step 2 of 2</b>")
+			self.back_button.set_sensitive(True)
+			self.next_button.set_label("Finish")
+			# Refresh effect chain when entering step 2
+			if self.connected and hasattr(self, 'effect_chain') and isinstance(self.effect_chain, EffectChainWidget):
+				GLib.idle_add(self.effect_chain.refresh)
+			# Initialize step 2 if needed
+			if self.connected:
+				GLib.idle_add(self._load_initial_camera_data)
+		elif self.current_step == 2:
+			# Finish button - just close the window (resources stay active for camera use)
+			logger.info("Finish clicked - closing window (resources remain active)")
+			self.close()
+	
+	def _on_back_clicked(self, button: Gtk.Button):
+		"""Handle Back button click - move to step 1."""
+		if self.current_step == 2:
+			# Release step 2 resources (preview widget, stop camera)
+			self._release_step2_resources()
+			# Move to step 1
+			self.current_step = 1
+			self.stack.set_visible_child_name("step1")
+			self.step_label.set_markup("<b>Step 1 of 2</b>")
+			self.back_button.set_sensitive(False)
+			self.next_button.set_label("Next")
+	
+	def _release_step1_resources(self):
+		"""Release all resources used in step 1 (Camera Setup)."""
+		logger.info("Releasing step 1 resources")
+		try:
+			# Stop direct preview
+			if hasattr(self, 'direct_preview_widget'):
+				self.direct_preview_widget.stop_preview()
+				logger.debug("Direct preview stopped")
+		except Exception as e:
+			logger.error(f"Error releasing step 1 resources: {e}", exc_info=True)
+	
+	def _release_step2_resources(self):
+		"""Release all resources used in step 2 (Virtual Preview)."""
+		logger.info("Releasing step 2 resources")
+		try:
+			# Stop preview widget
+			if hasattr(self, 'preview_widget'):
+				self.preview_widget.stop_preview()
+				logger.debug("Preview widget stopped")
+			
+			# Stop camera via D-Bus if active
+			if self.connected and self.dbus_client and self.camera_state_active:
+				try:
+					self.dbus_client.stop_camera()
+					self.camera_state_active = False
+					if hasattr(self, 'camera_toggle'):
+						self._update_camera_toggle(False)
+					logger.debug("Camera stopped via D-Bus")
+				except Exception as e:
+					logger.error(f"Error stopping camera via D-Bus: {e}", exc_info=True)
+		except Exception as e:
+			logger.error(f"Error releasing step 2 resources: {e}", exc_info=True)
+	
+	def _register_crash_handlers(self):
+		"""Register signal handlers to ensure camera is released on crash."""
+		def emergency_cleanup():
+			"""Emergency cleanup function called on crash."""
+			logger.critical("Emergency cleanup triggered - releasing camera resources")
+			try:
+				# Release all resources regardless of current step
+				if hasattr(self, 'direct_preview_widget'):
+					try:
+						self.direct_preview_widget.stop_preview()
+					except Exception:
+						pass
+				
+				if hasattr(self, 'preview_widget'):
+					try:
+						self.preview_widget.stop_preview()
+					except Exception:
+						pass
+				
+				# Stop camera via D-Bus
+				if self.connected and self.dbus_client:
+					try:
+						self.dbus_client.stop_camera()
+					except Exception:
+						pass
+			except Exception as e:
+				logger.error(f"Error in emergency cleanup: {e}", exc_info=True)
+		
+		def signal_handler(signum, frame):
+			"""Handle signals like SIGTERM, SIGINT."""
+			logger.warning(f"Received signal {signum}, cleaning up resources")
+			emergency_cleanup()
+			sys.exit(0)
+		
+		# Register signal handlers
+		signal.signal(signal.SIGTERM, signal_handler)
+		signal.signal(signal.SIGINT, signal_handler)
+		
+		# Register exception handler for uncaught exceptions
+		def excepthook(exc_type, exc_value, exc_traceback):
+			"""Handle uncaught exceptions."""
+			logger.critical("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+			emergency_cleanup()
+			# Call default exception handler
+			sys.__excepthook__(exc_type, exc_value, exc_traceback)
+		
+		sys.excepthook = excepthook
+	
 	def do_close_request(self):
 		"""Handle window close request."""
-		# Stop preview
-		if hasattr(self, 'preview_widget'):
-			self.preview_widget.stop_preview()
+		logger.info("Window close requested, releasing all resources")
+		# Release resources based on current step
+		if self.current_step == 1:
+			self._release_step1_resources()
+		else:
+			self._release_step2_resources()
+		
 		# Quit the application
 		app = self.get_application()
 		if app:

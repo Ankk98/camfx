@@ -1,13 +1,21 @@
 """Effect chain and controller for managing effects at runtime."""
 
+import logging
 import threading
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 import numpy as np
+import cv2
 
 from .effects import (
 	BackgroundBlur, BackgroundReplace, BrightnessAdjustment,
 	FaceBeautification, AutoFraming, EyeGazeCorrection
 )
+
+logger = logging.getLogger(__name__)
+
+# Path to default background image
+_DEFAULT_BACKGROUND_PATH = Path(__file__).parent / "resources" / "default_background.jpg"
 
 
 class EffectChain:
@@ -134,7 +142,33 @@ class EffectChain:
 			
 			# Apply effect
 			if needs_mask and current_mask is not None:
-				result = effect.apply(result, current_mask, **effect_kwargs)
+				# BackgroundReplace requires background as a positional argument
+				if effect.__class__.__name__ == 'BackgroundReplace':
+					# Check if 'background' (numpy array) is provided, otherwise load from 'image' (file path)
+					background = effect_kwargs.pop('background', None)
+					if background is None:
+						image_path = effect_kwargs.pop('image', None)
+						if image_path:
+							background = cv2.imread(image_path)
+							if background is None:
+								logger.warning(f"Failed to load background image from '{image_path}', using default background")
+								# Fall back to default background if user-provided image fails to load
+								image_path = None
+						
+						# If no image path provided or user image failed, use default background
+						if background is None:
+							if _DEFAULT_BACKGROUND_PATH.exists():
+								background = cv2.imread(str(_DEFAULT_BACKGROUND_PATH))
+								if background is None:
+									logger.error(f"Failed to load default background image from '{_DEFAULT_BACKGROUND_PATH}', skipping BackgroundReplace")
+									continue
+								logger.debug("Using default professional workspace background image")
+							else:
+								logger.warning(f"Default background image not found at '{_DEFAULT_BACKGROUND_PATH}', skipping BackgroundReplace")
+								continue
+					result = effect.apply(result, current_mask, background)
+				else:
+					result = effect.apply(result, current_mask, **effect_kwargs)
 			else:
 				# For effects that don't need mask, pass None
 				# Some effects like BrightnessAdjustment may use mask if face_only=True

@@ -202,14 +202,31 @@ class PipeWireInput:
 			raise RuntimeError("Failed to get pipewiresrc element")
 		self.pipewire_src = pwsrc_element
 		
-		target_candidates = [
-			source_info.media_name,
-			self.source_name,
-			source_info.node_description,
-			source_info.node_name,
-			source_info.object_serial,
-		]
-		target_object = next((str(c) for c in target_candidates if c), None)
+		target_object = None
+		target_reason = None
+		
+		if source_info.object_serial:
+			target_object = str(source_info.object_serial)
+			target_reason = "object_serial"
+		elif source_info.node_name:
+			target_object = source_info.node_name
+			target_reason = "node_name"
+		elif source_info.media_name:
+			target_object = source_info.media_name
+			target_reason = "media_name"
+		elif self.source_name:
+			target_object = self.source_name
+			target_reason = "configured_source_name"
+		elif source_info.id is not None:
+			target_object = str(source_info.id)
+			target_reason = "node_id"
+		
+		path_value = None
+		if source_info.object_path:
+			path_value = source_info.object_path
+		elif source_info.id is not None:
+			path_value = str(source_info.id)
+		
 		if target_object:
 			self.pipewire_src.set_property('target-object', target_object)
 		# Provide friendly client name when supported
@@ -220,13 +237,14 @@ class PipeWireInput:
 		actual_target = self.pipewire_src.get_property('target-object')
 		
 		actual_path = None
-		if source_info.object_path:
-			self.pipewire_src.set_property('path', source_info.object_path)
+		if path_value:
+			self.pipewire_src.set_property('path', path_value)
 			actual_path = self.pipewire_src.get_property('path')
 		
 		logger.info(
-			"Configured pipewiresrc with target_object=%s path=%s",
+			"Configured pipewiresrc with target_object=%s reason=%s path=%s",
 			actual_target,
+			target_reason,
 			actual_path,
 		)
 		

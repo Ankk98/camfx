@@ -397,7 +397,15 @@ class EffectControlsWidget(Gtk.Box):
 		label.set_xalign(0)
 		box.append(label)
 		
-		button = Gtk.Button(label="Select Image...")
+		# Check if image path is already in config
+		image_path = self.config.get('image') or self.config.get('background')
+		if isinstance(image_path, str):
+			import os
+			button_label = f"Selected: {os.path.basename(image_path)}"
+		else:
+			button_label = "Select Image..."
+		
+		button = Gtk.Button(label=button_label)
 		
 		def on_clicked(button):
 			# Create file chooser dialog
