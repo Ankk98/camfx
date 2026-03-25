@@ -492,10 +492,33 @@ class VideoEnhancer:
 				# Initialize segmenter if needed
 				if needs_mask and self.segmenter is None:
 					self._log_checkpoint('segmenter.init', reason='mask_required')
-					self.segmenter = PersonSegmenter()
+					try:
+						self.segmenter = PersonSegmenter()
+					except Exception as seg_init_err:
+						# Don't crash the daemon if MediaPipe is missing/broken; we can
+						# still run with mask=None (blur becomes full-frame; replace uses fallback).
+						logger.error("Failed to initialize segmenter: %s", seg_init_err, exc_info=True)
+						self._log_checkpoint(
+							'segmenter.init.failed',
+							level=logging.ERROR,
+							error=str(seg_init_err),
+						)
+						self.segmenter = None
 				
 				# Get mask if needed
-				mask = self.segmenter.get_mask(frame) if needs_mask else None
+				mask = None
+				if needs_mask and self.segmenter is not None:
+					try:
+						timestamp_ms = int(time.time() * 1000)
+						mask = self.segmenter.get_mask(frame, timestamp_ms)
+					except Exception as seg_err:
+						logger.error("Segmentation mask failed: %s", seg_err, exc_info=True)
+						self._log_checkpoint(
+							'segmenter.mask.failed',
+							level=logging.ERROR,
+							error=str(seg_err),
+						)
+						mask = None
 				
 				# Apply effect chain
 				try:

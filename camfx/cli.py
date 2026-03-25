@@ -13,6 +13,7 @@ from typing import TextIO
 import click
 
 from .core import VideoEnhancer
+from .effect_specs import EFFECT_SPECS, EFFECT_KEYS
 
 logger = logging.getLogger('camfx.cli')
 _CLI_LOGGING_CONFIGURED = False
@@ -42,9 +43,16 @@ class _TeeStream(io.TextIOBase):
 		self._run_id = run_id
 		self._command_name = (command_name or 'cli').replace(' ', '_')
 
-	def write(self, s: str) -> int:
+	def write(self, s) -> int:
 		if not s:
 			return 0
+
+		# Some libraries (including click) may write bytes depending on stream detection.
+		if isinstance(s, (bytes, bytearray)):
+			try:
+				s = bytes(s).decode("utf-8", errors="replace")
+			except Exception:
+				s = str(s)
 
 		self._original.write(s)
 		timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -318,15 +326,42 @@ def list_devices():
 		print(f"{dev}: {name}")
 
 
+@cli.command("effects")
+def effects():
+	"""List effects and their supported options."""
+	print("Available effects:\n")
+	for spec in EFFECT_SPECS:
+		req = " (requires MediaPipe Tasks models)" if spec.requires_mediapipe_tasks else ""
+		print(f"- {spec.key}: {spec.title}{req}")
+		print(f"  {spec.description}")
+		if not spec.params:
+			print("  Options: (none)")
+		else:
+			print("  Options:")
+			for p in spec.params:
+				extra = []
+				if p.value_range:
+					extra.append(p.value_range)
+				if p.default is not None:
+					extra.append(f"default={p.default}")
+				if p.notes:
+					extra.append(p.notes)
+				suffix = f" ({'; '.join(extra)})" if extra else ""
+				print(f"    {p.flag}: {p.help}{suffix}")
+		print()
+
+
 @cli.command('set-effect')
-@click.option('--effect', required=True, type=click.Choice(['blur', 'replace', 'brightness', 'beautify', 'autoframe', 'gaze-correct']))
-@click.option('--strength', type=int, help='For blur effect (must be odd)')
-@click.option('--brightness', type=int, help='For brightness effect (-100 to 100)')
-@click.option('--contrast', type=float, help='For brightness effect (0.5 to 2.0)')
-@click.option('--smoothness', type=int, help='For beautify effect (1-15)')
-@click.option('--padding', type=float, help='For autoframe effect')
-@click.option('--min-zoom', type=float, help='For autoframe effect')
-@click.option('--max-zoom', type=float, help='For autoframe effect')
+@click.option('--effect', required=True, type=click.Choice(EFFECT_KEYS))
+@click.option('--strength', type=float, help='Blur: kernel size (int) | Gaze: strength (0.0..1.0)')
+@click.option('--image', type=str, help='Replace: background image path')
+@click.option('--brightness', type=int, help='Brightness: -100..100')
+@click.option('--contrast', type=float, help='Brightness: 0.5..2.0')
+@click.option('--face-only', is_flag=True, default=False, help='Brightness: apply only to masked region (requires segmentation)')
+@click.option('--smoothness', type=int, help='Beautify: 1..15')
+@click.option('--padding', type=float, help='Autoframe: 0.0..1.0')
+@click.option('--min-zoom', type=float, help='Autoframe: >= 1.0')
+@click.option('--max-zoom', type=float, help='Autoframe: >= min-zoom')
 def set_effect(effect, **kwargs):
 	"""Change effect at runtime via D-Bus (replaces all effects)."""
 	try:
@@ -335,11 +370,14 @@ def set_effect(effect, **kwargs):
 		service = bus.get_object('org.camfx.Control1', '/org/camfx/Control1')
 		control = dbus.Interface(service, 'org.camfx.Control1')
 		
-		# Build config dict from kwargs
+		# Build config dict from kwargs (drop None, and omit false flags by default)
 		config = {}
 		for key, value in kwargs.items():
-			if value is not None:
-				config[key] = value
+			if value is None:
+				continue
+			if isinstance(value, bool) and value is False:
+				continue
+			config[key] = value
 		
 		success = control.SetEffect(effect, config)
 		if success:
@@ -356,14 +394,16 @@ def set_effect(effect, **kwargs):
 
 
 @cli.command('add-effect')
-@click.option('--effect', required=True, type=click.Choice(['blur', 'replace', 'brightness', 'beautify', 'autoframe', 'gaze-correct']))
-@click.option('--strength', type=int, help='For blur effect (must be odd)')
-@click.option('--brightness', type=int, help='For brightness effect (-100 to 100)')
-@click.option('--contrast', type=float, help='For brightness effect (0.5 to 2.0)')
-@click.option('--smoothness', type=int, help='For beautify effect (1-15)')
-@click.option('--padding', type=float, help='For autoframe effect')
-@click.option('--min-zoom', type=float, help='For autoframe effect')
-@click.option('--max-zoom', type=float, help='For autoframe effect')
+@click.option('--effect', required=True, type=click.Choice(EFFECT_KEYS))
+@click.option('--strength', type=float, help='Blur: kernel size (int) | Gaze: strength (0.0..1.0)')
+@click.option('--image', type=str, help='Replace: background image path')
+@click.option('--brightness', type=int, help='Brightness: -100..100')
+@click.option('--contrast', type=float, help='Brightness: 0.5..2.0')
+@click.option('--face-only', is_flag=True, default=False, help='Brightness: apply only to masked region (requires segmentation)')
+@click.option('--smoothness', type=int, help='Beautify: 1..15')
+@click.option('--padding', type=float, help='Autoframe: 0.0..1.0')
+@click.option('--min-zoom', type=float, help='Autoframe: >= 1.0')
+@click.option('--max-zoom', type=float, help='Autoframe: >= min-zoom')
 def add_effect(effect, **kwargs):
 	"""Add effect to chain at runtime via D-Bus."""
 	try:
@@ -372,11 +412,14 @@ def add_effect(effect, **kwargs):
 		service = bus.get_object('org.camfx.Control1', '/org/camfx/Control1')
 		control = dbus.Interface(service, 'org.camfx.Control1')
 		
-		# Build config dict from kwargs
+		# Build config dict from kwargs (drop None, and omit false flags by default)
 		config = {}
 		for key, value in kwargs.items():
-			if value is not None:
-				config[key] = value
+			if value is None:
+				continue
+			if isinstance(value, bool) and value is False:
+				continue
+			config[key] = value
 		
 		success = control.AddEffect(effect, config)
 		if success:
@@ -394,7 +437,7 @@ def add_effect(effect, **kwargs):
 
 @cli.command('remove-effect')
 @click.option('--index', type=int, help='Index of effect to remove (0-based)')
-@click.option('--effect', type=click.Choice(['blur', 'replace', 'brightness', 'beautify', 'autoframe', 'gaze-correct']), help='Type of effect to remove')
+@click.option('--effect', type=click.Choice(EFFECT_KEYS), help='Type of effect to remove')
 def remove_effect(index, effect):
 	"""Remove effect from chain at runtime via D-Bus.
 	
@@ -528,6 +571,28 @@ def camera_status():
 		print("Error: D-Bus Python bindings not available. Install dbus-python or python-dbus.")
 	except Exception as e:
 		print(f"Error: {e}")
+
+
+@cli.command('models-download')
+def models_download():
+	"""Prefetch MediaPipe Tasks models for ML effects."""
+	try:
+		from .mediapipe_tasks import ensure_model, SELFIE_SEGMENTER_LANDSCAPE, FACE_LANDMARKER, _default_models_dir
+	except Exception as e:
+		print(f"Error: cannot import MediaPipe Tasks backend: {e}")
+		print("Make sure mediapipe is installed: pip install mediapipe")
+		raise SystemExit(1)
+
+	print(f"Downloading models to: {_default_models_dir()}")
+	try:
+		p1 = ensure_model(SELFIE_SEGMENTER_LANDSCAPE)
+		print(f"✓ {SELFIE_SEGMENTER_LANDSCAPE.name}: {p1}")
+		p2 = ensure_model(FACE_LANDMARKER)
+		print(f"✓ {FACE_LANDMARKER.name}: {p2}")
+		print("All models downloaded.")
+	except Exception as e:
+		print(f"Error downloading models: {e}")
+		raise SystemExit(1)
 
 
 @cli.command()

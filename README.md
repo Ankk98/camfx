@@ -31,6 +31,7 @@ A lightweight, modular camera video enhancement middleware for Linux that provid
 - FFmpeg installed (`ffmpeg`)
 - v4l2loopback kernel module loaded (creates `/dev/videoX`)
 - Python 3.12 (see `.python-version`)
+ - MediaPipe (Tasks API) installed for ML effects (`pip install mediapipe`)
 
 Optional (GUI):
 - GTK4 + PyGObject (see “Optional Features” below)
@@ -59,6 +60,22 @@ pip install -e .
 Optional extras:
 - GUI: `pip install -e ".[gui]"`
 - D-Bus live control: `pip install -e ".[dbus]"`
+
+## ML Models (MediaPipe Tasks)
+
+camfx uses MediaPipe Tasks models for segmentation/landmarks. On first use it will download:
+- selfie segmenter model (`.tflite`)
+- face landmarker model (`.task`)
+
+Models are cached under `~/.cache/camfx/models` by default.
+Override with:
+- `CAMFX_MODELS_DIR=/path/to/models`
+
+Prefetch models explicitly (recommended for offline use):
+
+```bash
+camfx models-download
+```
 
 Optional: if you have `uv` installed, this can be even simpler/reliable:
 ```bash
