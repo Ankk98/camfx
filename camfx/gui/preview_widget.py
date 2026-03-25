@@ -1,6 +1,7 @@
 """Preview widget for displaying live camera feed."""
 
 import logging
+import os
 import sys
 import threading
 import time
@@ -16,13 +17,35 @@ from gi.repository import Gtk, Gdk, GdkPixbuf, GLib
 
 logger = logging.getLogger('camfx.gui.preview')
 
-try:
-	from ..input_pipewire import PipeWireInput
-	PIPEWIRE_AVAILABLE = True
-	logger.debug("PipeWireInput available")
-except ImportError as e:
-	PIPEWIRE_AVAILABLE = False
-	logger.warning(f"PipeWireInput not available: {e}")
+def _resolve_v4l2_device_from_card_label(card_label: str) -> Optional[str]:
+	"""Resolve a /dev/videoX node using v4l2loopback card_label.
+
+	This is the v4l2 equivalent of the old virtual-source discovery.
+	"""
+	if not card_label:
+		return None
+	if card_label.startswith("/dev/video"):
+		return card_label
+
+	sys_class = "/sys/class/video4linux"
+	try:
+		if os.path.isdir(sys_class):
+			for entry in sorted(os.listdir(sys_class)):
+				name_path = f"{sys_class}/{entry}/name"
+				try:
+					with open(name_path, "r", encoding="utf-8") as f:
+						n = f.read().strip()
+				except OSError:
+					continue
+
+				if n == card_label:
+					candidate = f"/dev/{entry}"
+					if os.path.exists(candidate):
+						return candidate
+	except Exception:
+		return None
+
+	return None
 
 
 class PreviewWidget(Gtk.Box):
@@ -32,11 +55,11 @@ class PreviewWidget(Gtk.Box):
 		"""Initialize preview widget.
 		
 		Args:
-			source_name: Name of PipeWire source to preview
+			source_name: v4l2 card_label or /dev/videoX node
 		"""
 		super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=10)
 		self.source_name = source_name
-		self.pipewire_input: Optional[PipeWireInput] = None
+		self._capture: Optional[cv2.VideoCapture] = None
 		self.preview_thread: Optional[threading.Thread] = None
 		self.running = False
 		self.current_frame: Optional[np.ndarray] = None
@@ -100,7 +123,7 @@ class PreviewWidget(Gtk.Box):
 			logger.info("Stopping preview (%s)", reason or "already stopped")
 		
 		self.running = False
-		self._release_pipewire_input()
+		self._release_capture()
 		if self.preview_thread:
 			self.preview_thread.join(timeout=2.0)
 			if self.preview_thread.is_alive():
@@ -145,33 +168,32 @@ class PreviewWidget(Gtk.Box):
 	def _preview_loop(self):
 		"""Preview loop running in separate thread."""
 		logger.debug("Preview loop thread started")
-		
-		# Try to connect to PipeWire source
-		if PIPEWIRE_AVAILABLE:
-			while self.running and self.pipewire_input is None:
-				try:
-					logger.info(f"Connecting to PipeWire source '{self.source_name}'")
-					self.pipewire_input = PipeWireInput(source_name=self.source_name)
-					logger.info("Successfully connected to PipeWire source")
-					GLib.idle_add(self._update_status, "Preview: Connected")
-				except RuntimeError as e:
-					if not self.running:
-						return
-					logger.warning("Virtual camera busy: %s", e)
-					GLib.idle_add(self._update_status, "Preview: Virtual camera busy, retrying…")
-					self._release_pipewire_input()
-					time.sleep(0.5)
-				except Exception as e:
-					logger.error(f"Exception connecting to PipeWire source: {e}", exc_info=True)
-					error_msg = f"Preview: Error - {str(e)}"
-					GLib.idle_add(self._update_status, error_msg)
-					self.running = False
-					return
-				if not self.running:
-					return
-		else:
-			logger.error("PipeWire not available")
-			GLib.idle_add(self._update_status, "Preview: PipeWire not available")
+		# Resolve and open a v4l2 device node (v4l2loopback /dev/videoX)
+		device = self.source_name
+		if device and not str(device).startswith("/dev/video"):
+			resolved = _resolve_v4l2_device_from_card_label(str(device))
+			if resolved:
+				device = resolved
+
+		if not device:
+			GLib.idle_add(self._update_status, "Preview: No v4l2 device resolved")
+			self.running = False
+			return
+
+		if not str(device).startswith("/dev/video"):
+			GLib.idle_add(self._update_status, f"Preview: Invalid v4l2 device '{device}'")
+			self.running = False
+			return
+
+		try:
+			logger.info("Opening v4l2 preview device %s", device)
+			self._capture = cv2.VideoCapture(device)
+			if not self._capture.isOpened():
+				raise RuntimeError(f"Cannot open {device}")
+			GLib.idle_add(self._update_status, f"Preview: Connected ({device})")
+		except Exception as e:
+			logger.error("Failed to open v4l2 device: %s", e, exc_info=True)
+			GLib.idle_add(self._update_status, f"Preview: Error - {e}")
 			self.running = False
 			return
 		
@@ -184,9 +206,9 @@ class PreviewWidget(Gtk.Box):
 		logger.info("Entering main preview loop")
 		
 		while self.running:
-			if self.pipewire_input:
+			if self._capture:
 				try:
-					ret, frame = self.pipewire_input.read()
+					ret, frame = self._capture.read()
 					if ret and frame is not None:
 						if self._should_log_debug('_last_frame_log', self._frame_log_interval):
 							logger.debug("Frame received: shape=%s, dtype=%s", frame.shape, frame.dtype)
@@ -212,7 +234,7 @@ class PreviewWidget(Gtk.Box):
 					else:
 						no_frame_count += 1
 						if no_frame_count == 1:
-							logger.debug("No frame available from PipeWireInput")
+							logger.debug("No frame available from v4l2 device")
 						if no_frame_count > 100:  # ~1 second at 10ms intervals
 							logger.warning("No frames received for ~1 second")
 							no_frame_count = 0
@@ -221,21 +243,21 @@ class PreviewWidget(Gtk.Box):
 					logger.error(f"Exception in preview loop: {e}", exc_info=True)
 					time.sleep(0.1)
 			else:
-				logger.warning("pipewire_input is None, breaking loop")
+				logger.warning("_capture is None, breaking preview loop")
 				break
 		
 		# Cleanup
 		logger.info("Exiting preview loop, cleaning up")
-		self._release_pipewire_input()
+		self._release_capture()
 
-	def _release_pipewire_input(self):
-		if self.pipewire_input:
+	def _release_capture(self):
+		if self._capture:
 			try:
-				self.pipewire_input.release()
-				logger.debug("PipeWireInput released")
+				self._capture.release()
+				logger.debug("v4l2 preview capture released")
 			except Exception as e:
-				logger.error(f"Error releasing PipeWireInput: {e}", exc_info=True)
-		self.pipewire_input = None
+				logger.error(f"Error releasing v4l2 capture: {e}", exc_info=True)
+		self._capture = None
 	
 	def _update_frame(self, frame: np.ndarray):
 		"""Update picture widget with new frame (called from main thread)."""

@@ -1,6 +1,6 @@
 # camfx
 
-A lightweight, modular camera video enhancement middleware for Linux that provides real-time effects with live switching and effect chaining, outputting to a virtual camera via PipeWire. Includes both CLI and GTK GUI interfaces for effect management.
+A lightweight, modular camera video enhancement middleware for Linux that provides real-time effects with live switching and effect chaining, outputting to a universal V4L2 virtual camera (/dev/videoX) via `v4l2loopback` + FFmpeg. Includes both CLI and GTK GUI interfaces for effect management.
 
 ## Features
 
@@ -19,7 +19,7 @@ A lightweight, modular camera video enhancement middleware for Linux that provid
 - ✅ All effects: Working
 - ✅ Effect chaining: Working
 - ✅ Live effect switching: Working (D-Bus)
-- ✅ PipeWire virtual camera: Working
+- ✅ V4L2 loopback virtual camera: Working (requires v4l2loopback + /dev/videoX)
 - ✅ Camera control: Working (start/stop via D-Bus or CLI)
 - ✅ GTK GUI: Working (effect management, parameter controls, camera toggle)
 - ⚠️ Application compatibility: Limited (see Known Limitations below)
@@ -28,20 +28,15 @@ A lightweight, modular camera video enhancement middleware for Linux that provid
 
 ## Prerequisites
 
-- Linux with PipeWire (default on Fedora, GNOME, and modern distributions)
-- Python 3.10+ (uses modern type hints)
-- GStreamer and GStreamer plugins (usually pre-installed with PipeWire)
-- Wireplumber (PipeWire session manager) - usually pre-installed with PipeWire
+- FFmpeg installed (`ffmpeg`)
+- v4l2loopback kernel module loaded (creates `/dev/videoX`)
+- Python 3.12 (see `.python-version`)
 
-**System packages (Fedora):**
-```bash
-sudo dnf install python3-gobject gstreamer1 gstreamer1-plugins-base gstreamer1-plugins-good pipewire
-```
+Optional (GUI):
+- GTK4 + PyGObject (see “Optional Features” below)
 
-**System packages (Ubuntu/Debian):**
-```bash
-sudo apt install python3-gi python3-gi-cairo gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good pipewire
-```
+Optional (D-Bus control + live effect switching):
+- D-Bus Python bindings (`dbus-python`) and PyGObject
 
 ## Installation
 
@@ -51,49 +46,47 @@ git clone <repository-url>
 cd camfx
 
 # 2) Create and activate virtual environment (recommended)
-python3 -m venv .venv
+# This project targets Python 3.12 (see .python-version).
+python3.12 -m venv .venv
 source .venv/bin/activate
 
-# 3) Install package in editable mode
-pip install -U pip wheel
+# 3) Install dependencies + package in editable mode
+python -m pip install -U pip wheel setuptools
+pip install -r requirements.txt
 pip install -e .
+```
+
+Optional extras:
+- GUI: `pip install -e ".[gui]"`
+- D-Bus live control: `pip install -e ".[dbus]"`
+
+Optional: if you have `uv` installed, this can be even simpler/reliable:
+```bash
+cd /home/ankk98/repos/camfx
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install -r requirements.txt
+uv pip install -e .
 ```
 
 ## Quickstart
 
 ```bash
-# Start virtual camera daemon (camera is OFF by default)
-camfx start --dbus
+# v4l2loopback + FFmpeg must be available first.
 
-# Set initial effect
+# Option A (simplest): start output immediately (no D-Bus live switching)
+camfx start --name camfx
+camfx preview-virtual --name camfx
+
+# Option B: enable D-Bus for live effect switching + camera toggle
+camfx start --dbus --name camfx
 camfx set-effect --effect blur --strength 25
-
-# Start the camera (required for video output)
 camfx camera-start
 
-# Option 1: Use the GUI for easy effect management and camera control
-camfx gui
-
-# Option 2: Use CLI commands for effect and camera control
-# In another terminal, preview the output
-camfx preview
-
-# Change effect at runtime (requires --dbus flag)
+# Live update effects (requires --dbus flag)
 camfx set-effect --effect brightness --brightness 10
 
-# Add another effect to the chain
-camfx add-effect --effect beautify --smoothness 5
-
-# Update an effect (adding same type updates it)
-camfx add-effect --effect brightness --brightness 15
-
-# Remove an effect
-camfx remove-effect --effect blur
-
-# Check current effects
-camfx get-effects
-
-# Stop the camera
+# Stop camera
 camfx camera-stop
 
 # Check camera status
@@ -125,14 +118,14 @@ camfx start --name "My Virtual Camera"
 ### Preview
 
 ```bash
-# Preview output from running camfx instance
-camfx preview
+# Preview output from running camfx instance (v4l2loopback device)
+camfx preview-virtual --name camfx
 
-# Preview specific virtual camera
-camfx preview --name "My Virtual Camera"
+# Preview a specific virtual camera card_label
+camfx preview-virtual --name "My Virtual Camera"
 
-# Fallback: Preview camera directly with effect (if camfx not running)
-camfx preview --effect blur --strength 25
+# Preview physical camera directly (bypasses v4l2loopback)
+camfx preview-camera --input 0
 ```
 
 ### Camera Control
@@ -150,7 +143,9 @@ camfx camera-stop
 camfx camera-status
 ```
 
-**Note**: The camera is OFF by default when you start the daemon. You must explicitly start it using the commands above or the GUI toggle button.
+**Note**:
+- If you start with `--dbus`, the camera starts OFF until `camfx camera-start`.
+- If you start without `--dbus`, the camera starts immediately.
 
 ### Runtime Effect Control (D-Bus)
 
@@ -295,55 +290,48 @@ When the camera is off, the virtual camera outputs black frames. This saves reso
 
 ## Known Limitations
 
-### Virtual Camera Compatibility
+### V4L2 Loopback Compatibility
 
-**Current Status:** The virtual camera creates a PipeWire source but is **not visible to most applications**.
+**Current Status:** camfx outputs directly to a **V4L2** virtual device (`/dev/videoX`) via `v4l2loopback`, so it should work in most apps that accept V4L2 cameras.
 
-**Why?** Most applications (Zoom, Teams, Google Meet, browsers, etc.) expect V4L2 devices (`/dev/video*`), not PipeWire sources. PipeWire virtual sources are NOT automatically exposed as V4L2 devices.
+If an app still cannot see the camera:
+- Some apps need `exclusive_caps=1` when loading `v4l2loopback`.
+- Permissions/groups may prevent non-root access to `/dev/videoX`.
+- The app may expect a specific pixel format; camfx streams `YUV420P` to the v4l2 device.
 
-**What Works:**
-- ✅ Preview window (always works)
-- ✅ PipeWire-native applications (limited: OBS Studio, some browsers with special configuration)
-
-**What Doesn't Work:**
-- ❌ Most video conferencing applications (Zoom, Teams, Discord, Slack, etc.)
-- ❌ Most browsers by default (Chrome, Firefox without special flags)
-- ❌ Standard camera applications expecting `/dev/video*` devices
-
-**Workaround for Broad Compatibility:**
-
-To make the virtual camera visible to all applications, v4l2loopback kernel module is still required:
+To load `v4l2loopback` with stable discovery (via `card_label`):
 
 ```bash
-# Install v4l2loopback
-sudo dnf install v4l2loopback akmod-v4l2loopback  # Fedora
-# OR
-sudo apt install v4l2loopback-dkms              # Ubuntu/Debian
+# Fedora
+sudo dnf install v4l2loopback akmod-v4l2loopback
 
-# Load the module
-sudo modprobe v4l2loopback video_nr=10 card_label="camfx Virtual Camera"
+# Ubuntu/Debian
+# sudo apt install v4l2loopback-dkms
 
-# Verify it's loaded
+# Load the module (let the kernel choose videoN)
+sudo modprobe v4l2loopback exclusive_caps=1 card_label="camfx" video_nr=-1
+
+# Verify
 v4l2-ctl --list-devices
 ```
 
 ## Troubleshooting
 
-### PipeWire Virtual Camera
+### v4l2loopback
 
-- **PipeWire not detected**: Ensure PipeWire is installed and running:
+- **Virtual camera device not found**: ensure the module is loaded and a `/dev/videoX` node exists:
   ```bash
-  systemctl --user status pipewire
+  lsmod | grep v4l2loopback
+  ls -l /dev/video*
+  v4l2-ctl --list-devices
   ```
 
-- **Wireplumber not running**: The virtual camera requires wireplumber:
+- **Permissions denied opening `/dev/videoX`**: add your user to the `video` group (may require logout/login):
   ```bash
-  systemctl --user start wireplumber
-  systemctl --user enable wireplumber
-  systemctl --user status wireplumber
+  sudo usermod -aG video "$USER"
   ```
 
-- **Virtual camera not appearing in apps**: This is expected. See "Known Limitations" above.
+- **App cannot open the device**: try reloading with `exclusive_caps=1` (see “V4L2 Loopback Compatibility” above).
 
 ### D-Bus Control
 
@@ -360,7 +348,7 @@ v4l2-ctl --list-devices
 
 ### General
 
-- **Preview window does not appear**: Try previewing camera directly: `camfx preview --effect blur`
+- **Preview window does not appear**: try previewing the physical camera: `camfx preview-camera --input 0`
 - **Strength value errors**: The `--strength` parameter must be a positive odd integer (3, 5, 7, ...)
 
 ## Examples
@@ -378,7 +366,7 @@ camfx set-effect --effect blur --strength 25
 camfx camera-start
 
 # Terminal 2: Preview output
-camfx preview
+camfx preview-virtual --name camfx
 
 # Terminal 3: Change effect
 camfx set-effect --effect brightness --brightness 10

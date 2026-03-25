@@ -128,10 +128,12 @@ def cli():
 @click.option('--width', default=None, type=int, help='Input capture width')
 @click.option('--height', default=None, type=int, help='Input capture height')
 @click.option('--fps', default=30, type=int, help='Virtual camera FPS')
-@click.option('--name', default='camfx', type=str, help='Name for the virtual camera source')
+@click.option('--name', default='camfx', type=str, help='Virtual camera card label (v4l2loopback card_label)')
+@click.option('--v4l2-device', default='auto', type=str, help='v4l2 device node (e.g. /dev/video0) or auto')
+@click.option('--v4l2-card-label', default=None, type=str, help='Card label for auto-discovery (defaults to --name)')
 @click.option('--dbus', is_flag=True, default=False, help='Enable D-Bus service for runtime effect and camera control (REQUIRED for camera toggle)')
 def start(input_index: int, width: int | None, height: int | None, fps: int, name: str,
-         dbus: bool):
+         v4l2_device: str, v4l2_card_label: str | None, dbus: bool):
 	"""Start camfx daemon (virtual camera service).
 
 	The camera is OFF by default. Use D-Bus or CLI commands to control it:
@@ -150,6 +152,8 @@ def start(input_index: int, width: int | None, height: int | None, fps: int, nam
 			'fps': fps,
 			'enable_virtual': True,
 			'camera_name': name,
+			'v4l2_device': v4l2_device,
+			'v4l2_card_label': v4l2_card_label or name,
 			'enable_dbus': dbus,
 		},
 	)
@@ -201,18 +205,44 @@ def preview_camera(input_index: int):
 
 @cli.command('preview-virtual')
 @click.option('--name', default='camfx', type=str, help='Name of the camfx virtual camera source to preview')
-def preview_virtual(name: str):
-	"""Preview from camfx virtual camera."""
+@click.option('--v4l2-device', default='auto', type=str, help='v4l2 device node (e.g. /dev/video0) or auto')
+def preview_virtual(name: str, v4l2_device: str):
+	"""Preview from camfx v4l2 virtual camera."""
 	import cv2
 	import time
 
 	logger.info(f"Starting virtual camera preview: name={name}")
 
 	try:
-		from .input_pipewire import PipeWireInput
-		pw_input = PipeWireInput(source_name=name)
-		logger.info(f"Successfully connected to PipeWire source '{name}'")
-		print(f"Previewing output from '{name}' virtual camera")
+		device = v4l2_device
+		if device == "auto":
+			device = None
+			try:
+				sys_class = "/sys/class/video4linux"
+				if os.path.isdir(sys_class):
+					for entry in sorted(os.listdir(sys_class)):
+						name_path = f"{sys_class}/{entry}/name"
+						try:
+							with open(name_path, "r", encoding="utf-8") as f:
+								n = f.read().strip()
+							if n == name:
+								candidate = f"/dev/{entry}"
+								if os.path.exists(candidate):
+									device = candidate
+									break
+						except OSError:
+							continue
+			except Exception:
+				device = None
+			if not device:
+				raise RuntimeError("Could not resolve v4l2 device. Use --v4l2-device=/dev/videoX.")
+
+		cap = cv2.VideoCapture(device)
+		if not cap.isOpened():
+			raise RuntimeError(f"Cannot open v4l2 device: {device}")
+
+		logger.info(f"Successfully connected to v4l2 device '{device}'")
+		print(f"Previewing output from v4l2 device '{device}'")
 		print("Press 'q' to quit.")
 
 		cv2.namedWindow('camfx virtual preview', cv2.WINDOW_NORMAL)
@@ -225,7 +255,7 @@ def preview_virtual(name: str):
 			logger.info("Entering preview loop")
 
 			while True:
-				ret, frame = pw_input.read()
+				ret, frame = cap.read()
 				if ret and frame is not None:
 					logger.debug(f"Received frame: shape={frame.shape}, dtype={frame.dtype}")
 					cv2.imshow('camfx virtual preview', frame)
@@ -259,14 +289,14 @@ def preview_virtual(name: str):
 					break
 		finally:
 			logger.info("Cleaning up preview resources")
-			pw_input.release()
+			cap.release()
 			cv2.destroyAllWindows()
 			logger.debug("Preview cleanup complete")
 
 	except RuntimeError as e:
-		logger.error(f"Virtual camera '{name}' not found: {e}")
-		print(f"Error: Virtual camera '{name}' not found: {e}")
-		print("Make sure camfx is running (camfx start)")
+		logger.error(f"Virtual camera not available: {e}")
+		print(f"Error: {e}")
+		print("Make sure v4l2loopback is loaded and /dev/videoX exists")
 	except Exception as e:
 		logger.error(f"Error in virtual camera preview: {e}", exc_info=True)
 		print(f"Error: {e}")

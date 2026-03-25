@@ -12,7 +12,7 @@ This script tests:
 7. Application visibility
 
 Usage:
-    python scripts/test_ffmpeg_v4l2_feasibility.py [--device /dev/video10] [--width 1280] [--height 720] [--fps 30]
+    python scripts/test_ffmpeg_v4l2_feasibility.py [--device auto] [--width 1280] [--height 720] [--fps 30]
 """
 
 import argparse
@@ -68,9 +68,16 @@ def print_info(text: str):
 class FFmpegV4L2Tester:
     """Test FFmpeg + v4l2loopback feasibility"""
     
-    def __init__(self, device: str = "/dev/video10", width: int = 1280, 
-                 height: int = 720, fps: int = 30):
+    def __init__(
+        self,
+        device: str = "auto",
+        card_label: str = "camfx_test",
+        width: int = 1280,
+        height: int = 720,
+        fps: int = 30,
+    ):
         self.device = device
+        self.card_label = card_label
         self.width = width
         self.height = height
         self.fps = fps
@@ -167,6 +174,47 @@ class FFmpegV4L2Tester:
         print_header("Test 3: v4l2loopback Module")
         
         try:
+            def _discover_device_by_card_label() -> Optional[str]:
+                v4l2_ctl = shutil.which("v4l2-ctl")
+                if not v4l2_ctl:
+                    return None
+                # Parse `v4l2-ctl --list-devices` output to find the first node for this card_label.
+                result = subprocess.run(
+                    ["v4l2-ctl", "--list-devices"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if result.returncode != 0:
+                    return None
+                found_label = False
+                for line in result.stdout.splitlines():
+                    if not found_label:
+                        if self.card_label in line:
+                            found_label = True
+                        continue
+                    # After the label line, v4l2-ctl prints indented `/dev/videoX` lines.
+                    stripped = line.strip()
+                    if stripped.startswith("/dev/video"):
+                        return stripped
+                    # Stop when next device section begins.
+                    if stripped.endswith(":") and not stripped.startswith("/dev/video"):
+                        return None
+                return None
+
+            def _attempt_modprobe(modprobe_args: List[str], use_sudo: bool) -> bool:
+                # `modprobe_args` should start with the module name (e.g. ["v4l2loopback", ...])
+                cmd = (["sudo", "modprobe"] + modprobe_args) if use_sudo else (["modprobe"] + modprobe_args)
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if result.returncode == 0:
+                    return True
+                return False
+
             # Check if module is loaded
             result = subprocess.run(
                 ['lsmod'],
@@ -190,31 +238,116 @@ class FFmpegV4L2Tester:
                         if 'version:' in line.lower() or 'description:' in line.lower():
                             print_info(line.strip())
                 
+                # If the user asked for auto-device selection, try to resolve it now.
+                if self.device in ("auto", None):  # type: ignore[comparison-overlap]
+                    discovered = _discover_device_by_card_label()
+                    if discovered:
+                        self.device = discovered
+                    else:
+                        # Fallback: best-effort choose the most recently created /dev/videoX.
+                        nodes: List[str] = []
+                        try:
+                            for name in os.listdir("/dev"):
+                                if not name.startswith("video"):
+                                    continue
+                                full = os.path.join("/dev", name)
+                                if os.path.exists(full):
+                                    nodes.append(full)
+                        except Exception:
+                            nodes = []
+                        if nodes:
+                            nodes.sort(key=lambda p: os.stat(p).st_mtime, reverse=True)
+                            self.device = nodes[0]
+                            print_warning(
+                                f"v4l2-ctl not available or card_label not found; using most-recent node: {self.device}"
+                            )
+                
                 return True
             else:
                 print_warning("v4l2loopback module not loaded")
                 print_info("Attempting to load module...")
-                
-                # Try to load module
-                result = subprocess.run(
-                    ['sudo', 'modprobe', 'v4l2loopback', 
-                     f'video_nr={self.device.split("/")[-1].replace("video", "")}',
-                     'card_label=camfx_test',
-                     'exclusive_caps=1'],
-                    capture_output=True,
-                    text=True,
-                    timeout=10
-                )
-                
-                if result.returncode == 0:
+
+                def _list_video_nodes() -> List[str]:
+                    nodes: List[str] = []
+                    try:
+                        for name in os.listdir("/dev"):
+                            if not name.startswith("video"):
+                                continue
+                            full = os.path.join("/dev", name)
+                            if os.path.exists(full):
+                                nodes.append(full)
+                    except Exception:
+                        return []
+                    # Best-effort numeric ordering: /dev/video2 comes before /dev/video10
+                    def _num(n: str) -> int:
+                        try:
+                            return int(n.split("video")[-1])
+                        except Exception:
+                            return 0
+                    nodes.sort(key=_num)
+                    return nodes
+
+                pre_nodes: List[str] = []
+                if self.device in ("auto", None):  # type: ignore[comparison-overlap]
+                    pre_nodes = _list_video_nodes()
+
+                # If device is fixed, pass the derived video_nr. If it's auto, let the module decide.
+                try:
+                    if self.device not in ("auto", None):  # type: ignore[comparison-overlap]
+                        video_nr = self.device.split("/")[-1].replace("video", "")
+                    else:
+                        video_nr = None
+                except Exception:
+                    video_nr = None
+
+                # Build modprobe args (no sudo first, then retry with sudo).
+                base_args = [
+                    "v4l2loopback",
+                    "exclusive_caps=1",
+                    f"card_label={self.card_label}",
+                ]
+
+                args_candidates: List[List[str]] = []
+                if video_nr:
+                    args_candidates.append(base_args + [f"video_nr={video_nr}"])
+                else:
+                    # Auto device: prefer video_nr=-1, but keep a fallback without video_nr.
+                    args_candidates.append(base_args + ["video_nr=-1"])
+                    args_candidates.append(base_args)
+
+                # Try without sudo first.
+                ok = False
+                for modprobe_extra in args_candidates:
+                    ok = _attempt_modprobe(modprobe_extra, use_sudo=False)
+                    if ok:
+                        break
+
+                # If nosudo failed, try with sudo.
+                if not ok:
+                    for modprobe_extra in args_candidates:
+                        ok = _attempt_modprobe(modprobe_extra, use_sudo=True)
+                        if ok:
+                            break
+
+                if ok:
                     print_success("Module loaded successfully")
                     print_info("Module will be unloaded after tests")
                     self.results['module_loaded'] = True
+                    if self.device in ("auto", None):  # type: ignore[comparison-overlap]
+                        discovered = _discover_device_by_card_label()
+                        if discovered:
+                            self.device = discovered
+                        else:
+                            post_nodes = _list_video_nodes()
+                            new_nodes = [n for n in post_nodes if n not in pre_nodes]
+                            if new_nodes:
+                                self.device = new_nodes[0]
+                    # If we still couldn't set device, it will fail in the next tests with a clear message.
                     return True
-                else:
-                    print_error(f"Failed to load module: {result.stderr}")
-                    print_info("Install with: sudo apt install v4l2loopback-dkms")
-                    return False
+
+                print_error("Failed to load module (see stderr above)")
+                print_info("Install with: sudo apt install v4l2loopback-dkms (or your distro equivalent)")
+                return False
                     
         except FileNotFoundError:
             print_error("modprobe not found (unusual)")
@@ -222,10 +355,33 @@ class FFmpegV4L2Tester:
         except Exception as e:
             print_error(f"Error checking module: {e}")
             return False
+
+    def _is_valid_v4l2_char_device(self) -> bool:
+        """Return True only for real /dev/videoX character devices.
+
+        This prevents the script from accidentally treating values like "auto" as
+        a filesystem path and creating/using regular files.
+        """
+        if not self.device or self.device == "auto":
+            return False
+        if not isinstance(self.device, str) or not self.device.startswith("/dev/video"):
+            return False
+        if not os.path.exists(self.device):
+            return False
+        try:
+            st = os.stat(self.device)
+        except Exception:
+            return False
+        return stat.S_ISCHR(st.st_mode)
     
     def test_device_exists(self) -> bool:
         """Test 4: Check if v4l2loopback device exists"""
         print_header("Test 4: Device Existence")
+        
+        if not self.device or self.device == "auto":  # type: ignore[comparison-overlap]
+            print_error("Device is not set (auto-discovery failed).")
+            print_info("Fix: ensure v4l2-ctl is installed, or rerun with --device /dev/videoX.")
+            return False
         
         if os.path.exists(self.device):
             print_success(f"Device exists: {self.device}")
@@ -249,6 +405,11 @@ class FFmpegV4L2Tester:
         print_header("Test 5: Device Permissions")
         
         try:
+            if not self._is_valid_v4l2_char_device():
+                print_error(f"Not a valid V4L2 char device: {self.device}")
+                print_info("Expected something like /dev/videoX (created by v4l2loopback).")
+                return False
+
             # Check if we can open device for writing
             try:
                 with open(self.device, 'wb') as f:
@@ -274,6 +435,11 @@ class FFmpegV4L2Tester:
         print_header("Test 6: Device Information")
         
         try:
+            if not self._is_valid_v4l2_char_device():
+                print_error(f"Not a valid V4L2 char device: {self.device}")
+                print_info("Expected something like /dev/videoX (created by v4l2loopback).")
+                return False
+
             # Check if v4l2-ctl is available
             v4l2_ctl = shutil.which('v4l2-ctl')
             if not v4l2_ctl:
@@ -397,7 +563,7 @@ class FFmpegV4L2Tester:
         """Test 8: Test actual frame streaming to device"""
         print_header("Test 8: Frame Streaming to Device")
         
-        if not os.path.exists(self.device):
+        if not self._is_valid_v4l2_char_device():
             print_error("Device does not exist, skipping streaming test")
             return False
         
@@ -628,11 +794,25 @@ class FFmpegV4L2Tester:
         if self.results.get('module_loaded'):
             print_info("\nCleaning up: Unloading v4l2loopback module...")
             try:
-                subprocess.run(
-                    ['sudo', 'modprobe', '-r', 'v4l2loopback'],
-                    capture_output=True,
-                    timeout=5
-                )
+                ok = False
+                try:
+                    result = subprocess.run(
+                        ['modprobe', '-r', 'v4l2loopback'],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    ok = result.returncode == 0
+                except Exception:
+                    ok = False
+
+                if not ok:
+                    subprocess.run(
+                        ['sudo', 'modprobe', '-r', 'v4l2loopback'],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
                 print_success("Module unloaded")
             except Exception:
                 print_warning("Could not unload module (may be in use)")
@@ -701,8 +881,13 @@ def main():
     )
     parser.add_argument(
         '--device',
-        default='/dev/video10',
-        help='v4l2loopback device path (default: /dev/video10)'
+        default='auto',
+        help='v4l2loopback device path (default: auto-discover)'
+    )
+    parser.add_argument(
+        '--card-label',
+        default='camfx_test',
+        help='v4l2loopback card_label to use and search for when auto-discovering (default: camfx_test)'
     )
     parser.add_argument(
         '--width',
@@ -727,6 +912,7 @@ def main():
     
     tester = FFmpegV4L2Tester(
         device=args.device,
+        card_label=args.card_label,
         width=args.width,
         height=args.height,
         fps=args.fps

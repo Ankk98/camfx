@@ -24,9 +24,17 @@ class BackgroundBlur:
 
 
 class BackgroundReplace:
-	def apply(self, frame: np.ndarray, mask: np.ndarray, background: np.ndarray) -> np.ndarray:
+	def apply(self, frame: np.ndarray, mask: np.ndarray | None, background: np.ndarray) -> np.ndarray:
 		if background is None:
 			raise ValueError("Background image is not loaded or invalid.")
+
+		# Fallback when segmentation mask isn't available:
+		# replace the entire frame with the provided background.
+		# This keeps the effect from hard-failing when MediaPipe is not installed.
+		if mask is None:
+			bg = cv2.resize(background, (frame.shape[1], frame.shape[0])).astype(np.float32)
+			return np.clip(bg, 0, 255).astype(np.uint8)
+
 		frame_f = frame.astype(np.float32)
 		mask_f = np.clip(mask.astype(np.float32), 0.0, 1.0)
 		bg = cv2.resize(background, (frame.shape[1], frame.shape[0])).astype(np.float32)
@@ -81,13 +89,9 @@ class FaceBeautification:
 	bilateral filtering for natural-looking skin smoothing.
 	"""
 	def __init__(self):
-		import mediapipe as mp
-		self.face_mesh = mp.solutions.face_mesh.FaceMesh(
-			max_num_faces=1,
-			refine_landmarks=True,
-			min_detection_confidence=0.5,
-			min_tracking_confidence=0.5
-		)
+		# Lazy MediaPipe init so the module can be used without mediapipe
+		# unless this effect is actually applied.
+		self.face_mesh = None
 	
 	def apply(self, frame: np.ndarray, mask: np.ndarray | None = None, smoothness: int = 5) -> np.ndarray:
 		"""
@@ -101,6 +105,22 @@ class FaceBeautification:
 		# Ensure odd number for bilateral filter
 		if smoothness % 2 == 0:
 			smoothness += 1
+
+		if self.face_mesh is None:
+			try:
+				import mediapipe as mp  # type: ignore
+			except ImportError as e:
+				raise RuntimeError(
+					"MediaPipe is required for beautify-based effects. "
+					"Install with: pip install mediapipe"
+				) from e
+
+			self.face_mesh = mp.solutions.face_mesh.FaceMesh(
+				max_num_faces=1,
+				refine_landmarks=True,
+				min_detection_confidence=0.5,
+				min_tracking_confidence=0.5,
+			)
 		
 		# Convert to RGB for MediaPipe
 		frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -226,13 +246,9 @@ class EyeGazeCorrection:
 	to warp eye regions for natural-looking gaze correction.
 	"""
 	def __init__(self):
-		import mediapipe as mp
-		self.face_mesh = mp.solutions.face_mesh.FaceMesh(
-			max_num_faces=1,
-			refine_landmarks=True,  # Required for iris landmarks
-			min_detection_confidence=0.5,
-			min_tracking_confidence=0.5
-		)
+		# Lazy MediaPipe init so effect chaining doesn't require mediapipe
+		# unless this effect is actually applied.
+		self.face_mesh = None
 		# MediaPipe Face Mesh landmark indices
 		# Left eye landmarks (outer to inner)
 		self.LEFT_EYE_INDICES = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246]
@@ -317,6 +333,22 @@ class EyeGazeCorrection:
 			strength: Correction strength (0.0-1.0, higher = more correction)
 		"""
 		strength = np.clip(strength, 0.0, 1.0)
+
+		if self.face_mesh is None:
+			try:
+				import mediapipe as mp  # type: ignore
+			except ImportError as e:
+				raise RuntimeError(
+					"MediaPipe is required for gaze correction effects. "
+					"Install with: pip install mediapipe"
+				) from e
+
+			self.face_mesh = mp.solutions.face_mesh.FaceMesh(
+				max_num_faces=1,
+				refine_landmarks=True,  # Required for iris landmarks
+				min_detection_confidence=0.5,
+				min_tracking_confidence=0.5,
+			)
 		
 		# Convert to RGB for MediaPipe
 		frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)

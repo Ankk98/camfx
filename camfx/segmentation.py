@@ -1,13 +1,30 @@
 import cv2
-import mediapipe as mp
 import numpy as np
 
 
 class PersonSegmenter:
 	def __init__(self) -> None:
-		self.segmenter = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
+		# Lazy MediaPipe init: adding effects shouldn't require mediapipe,
+		# but applying mask/segmentation will.
+		self.segmenter = None
+		self._mp = None
+		self._model_selection = 1
 
 	def get_mask(self, frame: np.ndarray) -> np.ndarray:
+		if self.segmenter is None:
+			try:
+				import mediapipe as mp  # type: ignore
+			except ImportError as e:
+				raise RuntimeError(
+					"MediaPipe is required for person-segmentation based effects. "
+					"Install with: pip install mediapipe"
+				) from e
+
+			self._mp = mp
+			self.segmenter = mp.solutions.selfie_segmentation.SelfieSegmentation(
+				model_selection=self._model_selection
+			)
+
 		results = self.segmenter.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 		mask = getattr(results, "segmentation_mask", None)
 		if mask is None:
@@ -22,11 +39,26 @@ class PersonSegmenter:
 class FaceDetector:
 	"""Detects faces using MediaPipe Face Detection for auto-framing."""
 	def __init__(self) -> None:
+		# Lazy MediaPipe init. Face detection isn't needed unless an ML effect
+		# is actually applied.
+		self.detector = None
+		self.last_bbox = None  # For smoothing
+		self._min_detection_confidence = 0.5
+	def _ensure_detector(self) -> None:
+		if self.detector is not None:
+			return
+		try:
+			import mediapipe as mp  # type: ignore
+		except ImportError as e:
+			raise RuntimeError(
+				"MediaPipe is required for face detection based effects "
+				"(e.g. auto-framing / gaze correction). Install with: pip install mediapipe"
+			) from e
+
 		self.detector = mp.solutions.face_detection.FaceDetection(
 			model_selection=0,  # Short-range model (faster, good for close-up)
-			min_detection_confidence=0.5
+			min_detection_confidence=self._min_detection_confidence,
 		)
-		self.last_bbox = None  # For smoothing
 	
 	def get_face_bbox(self, frame: np.ndarray, smooth: bool = True) -> tuple[int, int, int, int] | None:
 		"""
@@ -37,6 +69,7 @@ class FaceDetector:
 			frame: Input frame (BGR format)
 			smooth: If True, smooth transitions using exponential moving average
 		"""
+		self._ensure_detector()
 		frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 		results = self.detector.process(frame_rgb)
 		
