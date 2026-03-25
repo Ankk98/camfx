@@ -98,6 +98,7 @@ _SEGMENTER_LOCK = Lock()
 _LANDMARKER_LOCK = Lock()
 _segmenter = None
 _landmarker = None
+_SEGMENTER_EMPTY_MASK_DEBUG_LAST = 0.0
 
 
 def _mp_import():
@@ -125,9 +126,12 @@ def get_image_segmenter():
 
 		options = ImageSegmenterOptions(
 			base_options=BaseOptions(model_asset_path=model_path),
-			running_mode=RunningMode.VIDEO,
+			# IMAGE mode avoids timestamp/tracking edge-cases.
+			running_mode=RunningMode.IMAGE,
+			# Category mask avoids needing to guess which confidence channel
+			# corresponds to "person" vs "background".
 			output_confidence_masks=True,
-			output_category_mask=False,
+			output_category_mask=True,
 		)
 		_segmenter = ImageSegmenter.create_from_options(options)
 		return _segmenter
@@ -164,15 +168,171 @@ def person_mask_from_bgr(frame_bgr: np.ndarray, timestamp_ms: int) -> np.ndarray
 	segmenter = get_image_segmenter()
 	frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
 	mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
-	result = segmenter.segment_for_video(mp_image, int(timestamp_ms))
-	# Selfie segmenter outputs 2 confidence masks: background(0), person(1)
+	# In IMAGE mode, we can use segment() (timestamp ignored).
+	if hasattr(segmenter, "segment"):
+		result = segmenter.segment(mp_image)
+	else:
+		# Fallback for older API shapes.
+		result = segmenter.segment_for_video(mp_image, int(timestamp_ms))
+	h, w = frame_bgr.shape[:2]
+	global _SEGMENTER_EMPTY_MASK_DEBUG_LAST
+
+	def _to_numpy(v):
+		if hasattr(v, "numpy_view"):
+			return v.numpy_view()
+		if hasattr(v, "to_numpy"):
+			return v.to_numpy()
+		return np.array(v)
+
+	# 1) Prefer category mask: selfie segmenter uses categories {0: background, 1: person}.
+	cat = getattr(result, "category_mask", None)
+	if cat:
+		try:
+			# category_mask is typically a list with one HxW mask image.
+			cat0 = cat[0]
+			raw_arr = _to_numpy(cat0)
+			# Some outputs may be HxWx1; normalize to HxW.
+			if hasattr(raw_arr, "ndim") and raw_arr.ndim == 3 and raw_arr.shape[-1] == 1:
+				raw_arr = raw_arr[:, :, 0]
+			raw_f = raw_arr.astype(np.float32)
+			cat_arr = raw_f.astype(np.int32)
+			if cat_arr.shape[0] != h or cat_arr.shape[1] != w:
+				cat_arr = cv2.resize(cat_arr, (w, h), interpolation=cv2.INTER_NEAREST)
+			if raw_f.shape[0] != h or raw_f.shape[1] != w:
+				raw_f = cv2.resize(raw_f, (w, h), interpolation=cv2.INTER_NEAREST)
+			labels = np.unique(cat_arr)
+
+			# Heuristic: pick the category value at the image center as "person".
+			center_label = int(cat_arr[h // 2, w // 2])
+			person = (cat_arr == center_label).astype(np.float32)
+
+			# Fallback if the chosen label covers (almost) everything or nothing.
+			person_mean = float(person.mean())
+			if (person_mean < 1e-4 or person_mean > 0.95) and len(labels) >= 2:
+				other_labels = [int(x) for x in labels if int(x) != center_label]
+				# Try the other label that isn't the center_label.
+				other = other_labels[0]
+				person = (cat_arr == other).astype(np.float32)
+
+			# If still empty, return all-zeros (but log debug occasionally).
+			if float(person.mean()) < 1e-6:
+				# If category_mask was actually probability-like, use it directly.
+				if float(raw_f.max()) <= 1.0 and float(raw_f.min()) >= 0.0:
+					person_prob = np.clip(raw_f, 0.0, 1.0).astype(np.float32)
+					if float(person_prob.mean()) >= 1e-6:
+						return cv2.GaussianBlur(person_prob, (21, 21), 0)
+				now = time.time()
+				if now - _SEGMENTER_EMPTY_MASK_DEBUG_LAST >= 5.0:
+					try:
+						logger.error(
+							"selfie segmenter produced empty person mask (all zeros). "
+							"category_labels=%s center_label=%s cat_min=%0.4f cat_max=%0.4f person_mean=%0.4f",
+							labels.tolist() if hasattr(labels, "tolist") else labels,
+							center_label,
+							float(cat_arr.min()),
+							float(cat_arr.max()),
+							float(person.mean()),
+						)
+					except Exception:
+						logger.error("selfie segmenter produced empty person mask (all zeros). (debug extraction failed)")
+					_SEGMENTER_EMPTY_MASK_DEBUG_LAST = now
+				return np.zeros((h, w), dtype=np.float32)
+
+			return cv2.GaussianBlur(person, (21, 21), 0)
+		except Exception:
+			pass
+
+	# 2) Fallback to confidence masks.
 	conf = getattr(result, "confidence_masks", None)
-	if not conf or len(conf) < 2:
-		h, w = frame_bgr.shape[:2]
+	if not conf or len(conf) < 1:
 		return np.zeros((h, w), dtype=np.float32)
-	person = conf[1].numpy_view()  # HxW float32
-	mask = np.clip(person.astype(np.float32), 0.0, 1.0)
-	return cv2.GaussianBlur(mask, (21, 21), 0)
+
+	def _to_float_array(v):
+		return _to_numpy(v).astype(np.float32)
+
+	def _squeeze_to_hw(arr: np.ndarray) -> np.ndarray:
+		# Normalize common HxWx1 or 1xHxW layouts down to HxW.
+		a = arr
+		if hasattr(a, "ndim") and a.ndim == 3:
+			if a.shape[-1] == 1:
+				a = a[:, :, 0]
+			elif a.shape[0] == 1:
+				a = a[0, :, :]
+		return a
+
+	def _center_mean(arr2d: np.ndarray) -> float:
+		cy0, cy1 = max(0, h // 2 - 5), min(h, h // 2 + 5)
+		cx0, cx1 = max(0, w // 2 - 5), min(w, w // 2 + 5)
+		return float(np.mean(arr2d[cy0:cy1, cx0:cx1]))
+
+	try:
+		# Some MediaPipe builds return only a single confidence map (often the "person"
+		# probability). Handle len(conf)==1 as a single map case.
+		if len(conf) == 1:
+			c0 = _squeeze_to_hw(_to_float_array(conf[0]))
+			if c0.ndim != 2:
+				# If it's multi-channel in a single tensor, try to select the best center channel.
+				if c0.ndim == 3 and (c0.shape[0] == 2 or c0.shape[-1] == 2):
+					if c0.shape[0] == 2:
+						ch0, ch1 = c0[0], c0[1]
+					else:
+						ch0, ch1 = c0[:, :, 0], c0[:, :, 1]
+					person_conf = ch1 if _center_mean(ch1) >= _center_mean(ch0) else ch0
+				else:
+					return np.zeros((h, w), dtype=np.float32)
+			else:
+				person_conf = c0
+			mask = np.clip(person_conf, 0.0, 1.0)
+			if float(mask.mean()) < 1e-6:
+				now = time.time()
+				if now - _SEGMENTER_EMPTY_MASK_DEBUG_LAST >= 5.0:
+					try:
+						logger.error(
+							"selfie segmenter confidence_masks(len=1) produced empty person mask. "
+							"mask_min=%0.4f mask_max=%0.4f mask_mean=%0.6f",
+							float(mask.min()),
+							float(mask.max()),
+							float(mask.mean()),
+						)
+					except Exception:
+						logger.error("selfie segmenter confidence_masks(len=1) produced empty person mask. (debug extraction failed)")
+				_SEGMENTER_EMPTY_MASK_DEBUG_LAST = now
+			return cv2.GaussianBlur(mask, (21, 21), 0)
+
+		# Standard path: two confidence maps (e.g. background/person).
+		c0 = _squeeze_to_hw(_to_float_array(conf[0]))
+		c1 = _squeeze_to_hw(_to_float_array(conf[1]))
+		if c0.shape != (h, w):
+			c0 = cv2.resize(c0, (w, h), interpolation=cv2.INTER_NEAREST)
+		if c1.shape != (h, w):
+			c1 = cv2.resize(c1, (w, h), interpolation=cv2.INTER_NEAREST)
+
+		center_mean0 = _center_mean(c0)
+		center_mean1 = _center_mean(c1)
+		person_conf = c1 if center_mean1 >= center_mean0 else c0
+
+		mask = np.clip(person_conf, 0.0, 1.0)
+		if float(mask.mean()) < 1e-6:
+			now = time.time()
+			if now - _SEGMENTER_EMPTY_MASK_DEBUG_LAST >= 5.0:
+				try:
+					logger.error(
+						"selfie segmenter confidence masks produced empty person mask. "
+						"center_mean0=%0.6f center_mean1=%0.6f c0_min=%0.4f c0_max=%0.4f c1_min=%0.4f c1_max=%0.4f",
+						center_mean0,
+						center_mean1,
+						float(c0.min()),
+						float(c0.max()),
+						float(c1.min()),
+						float(c1.max()),
+					)
+				except Exception:
+					logger.error("selfie segmenter confidence masks produced empty person mask. (debug extraction failed)")
+				_SEGMENTER_EMPTY_MASK_DEBUG_LAST = now
+		return cv2.GaussianBlur(mask, (21, 21), 0)
+	except Exception as e:
+		logger.error("selfie segmenter confidence mask extraction failed: %s", e, exc_info=True)
+		return np.zeros((h, w), dtype=np.float32)
 
 
 def face_landmarks_from_bgr(frame_bgr: np.ndarray, timestamp_ms: int):

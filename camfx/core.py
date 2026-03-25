@@ -7,7 +7,7 @@ import time
 from typing import Dict, List, Optional
 
 from .camera_devices import list_camera_devices, probe_camera_modes
-from .segmentation import PersonSegmenter
+from .segmentation import PersonSegmenter, FaceDetector
 from .output_v4l2_ffmpeg import V4L2OutputFFmpeg
 from .control import EffectController
 
@@ -29,6 +29,7 @@ class VideoEnhancer:
 		self._last_virtual_send_log = 0.0
 		self._virtual_frames_sent = 0
 		self._black_frames_sent = 0
+		self._last_seg_mask_debug_log = 0.0
 		self._last_effect_chain_signature: Optional[str] = None
 		self._virtual_warning_logged = False
 		
@@ -49,6 +50,7 @@ class VideoEnhancer:
 		
 		# Segmentation will be initialized lazily when needed
 		self.segmenter: Optional[PersonSegmenter] = None
+		self.face_detector: Optional[FaceDetector] = None
 		
 		# Get target dimensions and FPS from config
 		self.target_fps = int(self.config.get('fps', 30))
@@ -509,8 +511,53 @@ class VideoEnhancer:
 				mask = None
 				if needs_mask and self.segmenter is not None:
 					try:
-						timestamp_ms = int(time.time() * 1000)
+						# MediaPipe Tasks' VIDEO-mode APIs are timestamp-driven.
+						# Use a small relative, monotonic timestamp rather than epoch-ms
+						# to avoid edge-case failures/empty results.
+						frame_period_ms = 1000.0 / max(float(self.target_fps), 1.0)
+						timestamp_ms = int(frame_count * frame_period_ms)
 						mask = self.segmenter.get_mask(frame, timestamp_ms)
+						# One-time-per-effect-chain debug: confirm mask isn't empty/inverted.
+						if mask is not None and mask.size > 0:
+							now = time.time()
+							if now - self._last_seg_mask_debug_log >= 2.0:
+								min_v = float(np.min(mask))
+								max_v = float(np.max(mask))
+								mean_v = float(np.mean(mask))
+								logger.info(
+									"segmenter.mask.stats min=%0.4f max=%0.4f mean=%0.4f",
+									min_v,
+									max_v,
+									mean_v,
+								)
+								self._last_seg_mask_debug_log = now
+
+								# If mask is inverted (face blurry), attempt correction
+								# using face-landmarker bbox.
+								try:
+									if self.face_detector is None:
+										self.face_detector = FaceDetector()
+									if self.face_detector is not None:
+										bbox = self.face_detector.get_face_bbox(frame, timestamp_ms, smooth=True)
+										if bbox is not None:
+											x, y, w, h = bbox
+											face_area = mask[y:y + h, x:x + w]
+											if face_area.size > 0:
+												face_mean = float(np.mean(face_area))
+												overall_mean = float(np.mean(mask))
+												# If face_mean is much lower than overall mask mean,
+												# assume mask == background and invert.
+												if face_mean + 0.05 < overall_mean:
+													mask = 1.0 - mask
+													self._log_checkpoint(
+														"segmenter.mask.inverted",
+														face_mean=face_mean,
+														overall_mean=overall_mean,
+														bbox=bbox,
+													)
+								except Exception:
+									# Best-effort only; never break processing.
+									pass
 					except Exception as seg_err:
 						logger.error("Segmentation mask failed: %s", seg_err, exc_info=True)
 						self._log_checkpoint(
