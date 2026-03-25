@@ -173,10 +173,35 @@ class VideoEnhancer:
 				self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(self.config['width']))
 			if 'height' in self.config and self.config['height'] is not None:
 				self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(self.config['height']))
+
+			# High-res webcams often only reach high FPS in compressed modes
+			# (e.g. MJPG). If we stay on uncompressed formats (e.g. YUYV),
+			# capture throughput can collapse to ~2 FPS at 1080p.
+			# Try MJPG first for "large" resolutions.
+			try:
+				if self.width >= 1280 or self.height >= 720:
+					mjpg = cv2.VideoWriter_fourcc(*"MJPG")
+					self.cap.set(cv2.CAP_PROP_FOURCC, mjpg)
+			except Exception:
+				pass
+
+			# Try to set FPS. Some devices will ignore it if the chosen pixel
+			# format doesn't support the requested FPS.
+			try:
+				self.cap.set(cv2.CAP_PROP_FPS, float(self.target_fps))
+			except Exception:
+				pass
 			
 			# Update dimensions from actual camera
 			self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 			self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+			try:
+				actual_fps = float(self.cap.get(cv2.CAP_PROP_FPS)) or 0.0
+			except Exception:
+				actual_fps = 0.0
+			if actual_fps > 1.0:
+				# Use reported actual fps to keep output pacing consistent.
+				self.target_fps = int(round(actual_fps))
 			
 			self.camera_active = True
 			self._last_camera_state_log = time.time()
@@ -415,9 +440,8 @@ class VideoEnhancer:
 					# Send a black frame when camera is off
 					if self.virtual_cam is not None:
 						black_frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-						frame_rgb = cv2.cvtColor(black_frame, cv2.COLOR_BGR2RGB)
 						try:
-							self.virtual_cam.send(frame_rgb.tobytes())
+							self.virtual_cam.send(black_frame.tobytes())
 							self.virtual_cam.sleep_until_next_frame()
 							self._black_frames_sent += 1
 							if self._black_frames_sent == 1 or now - self._last_black_frame_log >= 5.0:
@@ -583,8 +607,10 @@ class VideoEnhancer:
 				# Send to virtual camera
 				if self.virtual_cam is not None:
 					try:
-						frame_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
-						self.virtual_cam.send(frame_rgb.tobytes())
+						# virtual_cam expects bgr24 bytes (OpenCV native BGR).
+						if not processed.flags["C_CONTIGUOUS"]:
+							processed = np.ascontiguousarray(processed)
+						self.virtual_cam.send(processed.tobytes())
 						self.virtual_cam.sleep_until_next_frame()
 						self._virtual_frames_sent += 1
 						now = time.time()

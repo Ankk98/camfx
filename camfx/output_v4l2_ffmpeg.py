@@ -145,7 +145,8 @@ class V4L2OutputFFmpeg:
 			"-f",
 			"rawvideo",
 			"-pixel_format",
-			"rgb24",
+			# We write OpenCV frames as BGR bytes into stdin.
+			"bgr24",
 			"-video_size",
 			f"{self.width}x{self.height}",
 			"-framerate",
