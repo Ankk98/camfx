@@ -481,13 +481,14 @@ class VideoEnhancer:
 				
 				# Determine if any effect in chain needs a mask
 				needs_mask = False
-				for effect, _ in chain.effects:
+				for effect, effect_config in chain.effects:
 					effect_class_name = effect.__class__.__name__
 					if effect_class_name in ['BackgroundBlur', 'BackgroundReplace']:
 						needs_mask = True
 						break
 					elif effect_class_name == 'BrightnessAdjustment':
-						if kwargs.get('face_only', False):
+						# "face_only" lives in the effect config, not in VideoEnhancer.run(**kwargs)
+						if bool(effect_config.get('face_only', False)):
 							needs_mask = True
 							break
 				
