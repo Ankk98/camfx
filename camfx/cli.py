@@ -13,6 +13,7 @@ from typing import TextIO
 import click
 
 from .core import VideoEnhancer
+from .effect_specs import EFFECT_SPECS, EFFECT_KEYS
 
 logger = logging.getLogger('camfx.cli')
 _CLI_LOGGING_CONFIGURED = False
@@ -42,9 +43,16 @@ class _TeeStream(io.TextIOBase):
 		self._run_id = run_id
 		self._command_name = (command_name or 'cli').replace(' ', '_')
 
-	def write(self, s: str) -> int:
+	def write(self, s) -> int:
 		if not s:
 			return 0
+
+		# Some libraries (including click) may write bytes depending on stream detection.
+		if isinstance(s, (bytes, bytearray)):
+			try:
+				s = bytes(s).decode("utf-8", errors="replace")
+			except Exception:
+				s = str(s)
 
 		self._original.write(s)
 		timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -128,10 +136,12 @@ def cli():
 @click.option('--width', default=None, type=int, help='Input capture width')
 @click.option('--height', default=None, type=int, help='Input capture height')
 @click.option('--fps', default=30, type=int, help='Virtual camera FPS')
-@click.option('--name', default='camfx', type=str, help='Name for the virtual camera source')
+@click.option('--name', default='camfx', type=str, help='Virtual camera card label (v4l2loopback card_label)')
+@click.option('--v4l2-device', default='auto', type=str, help='v4l2 device node (e.g. /dev/video0) or auto')
+@click.option('--v4l2-card-label', default=None, type=str, help='Card label for auto-discovery (defaults to --name)')
 @click.option('--dbus', is_flag=True, default=False, help='Enable D-Bus service for runtime effect and camera control (REQUIRED for camera toggle)')
 def start(input_index: int, width: int | None, height: int | None, fps: int, name: str,
-         dbus: bool):
+         v4l2_device: str, v4l2_card_label: str | None, dbus: bool):
 	"""Start camfx daemon (virtual camera service).
 
 	The camera is OFF by default. Use D-Bus or CLI commands to control it:
@@ -150,6 +160,8 @@ def start(input_index: int, width: int | None, height: int | None, fps: int, nam
 			'fps': fps,
 			'enable_virtual': True,
 			'camera_name': name,
+			'v4l2_device': v4l2_device,
+			'v4l2_card_label': v4l2_card_label or name,
 			'enable_dbus': dbus,
 		},
 	)
@@ -201,18 +213,44 @@ def preview_camera(input_index: int):
 
 @cli.command('preview-virtual')
 @click.option('--name', default='camfx', type=str, help='Name of the camfx virtual camera source to preview')
-def preview_virtual(name: str):
-	"""Preview from camfx virtual camera."""
+@click.option('--v4l2-device', default='auto', type=str, help='v4l2 device node (e.g. /dev/video0) or auto')
+def preview_virtual(name: str, v4l2_device: str):
+	"""Preview from camfx v4l2 virtual camera."""
 	import cv2
 	import time
 
 	logger.info(f"Starting virtual camera preview: name={name}")
 
 	try:
-		from .input_pipewire import PipeWireInput
-		pw_input = PipeWireInput(source_name=name)
-		logger.info(f"Successfully connected to PipeWire source '{name}'")
-		print(f"Previewing output from '{name}' virtual camera")
+		device = v4l2_device
+		if device == "auto":
+			device = None
+			try:
+				sys_class = "/sys/class/video4linux"
+				if os.path.isdir(sys_class):
+					for entry in sorted(os.listdir(sys_class)):
+						name_path = f"{sys_class}/{entry}/name"
+						try:
+							with open(name_path, "r", encoding="utf-8") as f:
+								n = f.read().strip()
+							if n == name:
+								candidate = f"/dev/{entry}"
+								if os.path.exists(candidate):
+									device = candidate
+									break
+						except OSError:
+							continue
+			except Exception:
+				device = None
+			if not device:
+				raise RuntimeError("Could not resolve v4l2 device. Use --v4l2-device=/dev/videoX.")
+
+		cap = cv2.VideoCapture(device)
+		if not cap.isOpened():
+			raise RuntimeError(f"Cannot open v4l2 device: {device}")
+
+		logger.info(f"Successfully connected to v4l2 device '{device}'")
+		print(f"Previewing output from v4l2 device '{device}'")
 		print("Press 'q' to quit.")
 
 		cv2.namedWindow('camfx virtual preview', cv2.WINDOW_NORMAL)
@@ -225,7 +263,7 @@ def preview_virtual(name: str):
 			logger.info("Entering preview loop")
 
 			while True:
-				ret, frame = pw_input.read()
+				ret, frame = cap.read()
 				if ret and frame is not None:
 					logger.debug(f"Received frame: shape={frame.shape}, dtype={frame.dtype}")
 					cv2.imshow('camfx virtual preview', frame)
@@ -259,14 +297,14 @@ def preview_virtual(name: str):
 					break
 		finally:
 			logger.info("Cleaning up preview resources")
-			pw_input.release()
+			cap.release()
 			cv2.destroyAllWindows()
 			logger.debug("Preview cleanup complete")
 
 	except RuntimeError as e:
-		logger.error(f"Virtual camera '{name}' not found: {e}")
-		print(f"Error: Virtual camera '{name}' not found: {e}")
-		print("Make sure camfx is running (camfx start)")
+		logger.error(f"Virtual camera not available: {e}")
+		print(f"Error: {e}")
+		print("Make sure v4l2loopback is loaded and /dev/videoX exists")
 	except Exception as e:
 		logger.error(f"Error in virtual camera preview: {e}", exc_info=True)
 		print(f"Error: {e}")
@@ -288,15 +326,42 @@ def list_devices():
 		print(f"{dev}: {name}")
 
 
+@cli.command("effects")
+def effects():
+	"""List effects and their supported options."""
+	print("Available effects:\n")
+	for spec in EFFECT_SPECS:
+		req = " (requires MediaPipe Tasks models)" if spec.requires_mediapipe_tasks else ""
+		print(f"- {spec.key}: {spec.title}{req}")
+		print(f"  {spec.description}")
+		if not spec.params:
+			print("  Options: (none)")
+		else:
+			print("  Options:")
+			for p in spec.params:
+				extra = []
+				if p.value_range:
+					extra.append(p.value_range)
+				if p.default is not None:
+					extra.append(f"default={p.default}")
+				if p.notes:
+					extra.append(p.notes)
+				suffix = f" ({'; '.join(extra)})" if extra else ""
+				print(f"    {p.flag}: {p.help}{suffix}")
+		print()
+
+
 @cli.command('set-effect')
-@click.option('--effect', required=True, type=click.Choice(['blur', 'replace', 'brightness', 'beautify', 'autoframe', 'gaze-correct']))
-@click.option('--strength', type=int, help='For blur effect (must be odd)')
-@click.option('--brightness', type=int, help='For brightness effect (-100 to 100)')
-@click.option('--contrast', type=float, help='For brightness effect (0.5 to 2.0)')
-@click.option('--smoothness', type=int, help='For beautify effect (1-15)')
-@click.option('--padding', type=float, help='For autoframe effect')
-@click.option('--min-zoom', type=float, help='For autoframe effect')
-@click.option('--max-zoom', type=float, help='For autoframe effect')
+@click.option('--effect', required=True, type=click.Choice(EFFECT_KEYS))
+@click.option('--strength', type=float, help='Blur: kernel size (int) | Gaze: strength (0.0..1.0)')
+@click.option('--image', type=str, help='Replace: background image path')
+@click.option('--brightness', type=int, help='Brightness: -100..100')
+@click.option('--contrast', type=float, help='Brightness: 0.5..2.0')
+@click.option('--face-only', is_flag=True, default=False, help='Brightness: apply only to masked region (requires segmentation)')
+@click.option('--smoothness', type=int, help='Beautify: 1..15')
+@click.option('--padding', type=float, help='Autoframe: 0.0..1.0')
+@click.option('--min-zoom', type=float, help='Autoframe: >= 1.0')
+@click.option('--max-zoom', type=float, help='Autoframe: >= min-zoom')
 def set_effect(effect, **kwargs):
 	"""Change effect at runtime via D-Bus (replaces all effects)."""
 	try:
@@ -305,11 +370,14 @@ def set_effect(effect, **kwargs):
 		service = bus.get_object('org.camfx.Control1', '/org/camfx/Control1')
 		control = dbus.Interface(service, 'org.camfx.Control1')
 		
-		# Build config dict from kwargs
+		# Build config dict from kwargs (drop None, and omit false flags by default)
 		config = {}
 		for key, value in kwargs.items():
-			if value is not None:
-				config[key] = value
+			if value is None:
+				continue
+			if isinstance(value, bool) and value is False:
+				continue
+			config[key] = value
 		
 		success = control.SetEffect(effect, config)
 		if success:
@@ -326,14 +394,16 @@ def set_effect(effect, **kwargs):
 
 
 @cli.command('add-effect')
-@click.option('--effect', required=True, type=click.Choice(['blur', 'replace', 'brightness', 'beautify', 'autoframe', 'gaze-correct']))
-@click.option('--strength', type=int, help='For blur effect (must be odd)')
-@click.option('--brightness', type=int, help='For brightness effect (-100 to 100)')
-@click.option('--contrast', type=float, help='For brightness effect (0.5 to 2.0)')
-@click.option('--smoothness', type=int, help='For beautify effect (1-15)')
-@click.option('--padding', type=float, help='For autoframe effect')
-@click.option('--min-zoom', type=float, help='For autoframe effect')
-@click.option('--max-zoom', type=float, help='For autoframe effect')
+@click.option('--effect', required=True, type=click.Choice(EFFECT_KEYS))
+@click.option('--strength', type=float, help='Blur: kernel size (int) | Gaze: strength (0.0..1.0)')
+@click.option('--image', type=str, help='Replace: background image path')
+@click.option('--brightness', type=int, help='Brightness: -100..100')
+@click.option('--contrast', type=float, help='Brightness: 0.5..2.0')
+@click.option('--face-only', is_flag=True, default=False, help='Brightness: apply only to masked region (requires segmentation)')
+@click.option('--smoothness', type=int, help='Beautify: 1..15')
+@click.option('--padding', type=float, help='Autoframe: 0.0..1.0')
+@click.option('--min-zoom', type=float, help='Autoframe: >= 1.0')
+@click.option('--max-zoom', type=float, help='Autoframe: >= min-zoom')
 def add_effect(effect, **kwargs):
 	"""Add effect to chain at runtime via D-Bus."""
 	try:
@@ -342,11 +412,14 @@ def add_effect(effect, **kwargs):
 		service = bus.get_object('org.camfx.Control1', '/org/camfx/Control1')
 		control = dbus.Interface(service, 'org.camfx.Control1')
 		
-		# Build config dict from kwargs
+		# Build config dict from kwargs (drop None, and omit false flags by default)
 		config = {}
 		for key, value in kwargs.items():
-			if value is not None:
-				config[key] = value
+			if value is None:
+				continue
+			if isinstance(value, bool) and value is False:
+				continue
+			config[key] = value
 		
 		success = control.AddEffect(effect, config)
 		if success:
@@ -364,7 +437,7 @@ def add_effect(effect, **kwargs):
 
 @cli.command('remove-effect')
 @click.option('--index', type=int, help='Index of effect to remove (0-based)')
-@click.option('--effect', type=click.Choice(['blur', 'replace', 'brightness', 'beautify', 'autoframe', 'gaze-correct']), help='Type of effect to remove')
+@click.option('--effect', type=click.Choice(EFFECT_KEYS), help='Type of effect to remove')
 def remove_effect(index, effect):
 	"""Remove effect from chain at runtime via D-Bus.
 	
@@ -498,6 +571,28 @@ def camera_status():
 		print("Error: D-Bus Python bindings not available. Install dbus-python or python-dbus.")
 	except Exception as e:
 		print(f"Error: {e}")
+
+
+@cli.command('models-download')
+def models_download():
+	"""Prefetch MediaPipe Tasks models for ML effects."""
+	try:
+		from .mediapipe_tasks import ensure_model, SELFIE_SEGMENTER_LANDSCAPE, FACE_LANDMARKER, _default_models_dir
+	except Exception as e:
+		print(f"Error: cannot import MediaPipe Tasks backend: {e}")
+		print("Make sure mediapipe is installed: pip install mediapipe")
+		raise SystemExit(1)
+
+	print(f"Downloading models to: {_default_models_dir()}")
+	try:
+		p1 = ensure_model(SELFIE_SEGMENTER_LANDSCAPE)
+		print(f"✓ {SELFIE_SEGMENTER_LANDSCAPE.name}: {p1}")
+		p2 = ensure_model(FACE_LANDMARKER)
+		print(f"✓ {FACE_LANDMARKER.name}: {p2}")
+		print("All models downloaded.")
+	except Exception as e:
+		print(f"Error downloading models: {e}")
+		raise SystemExit(1)
 
 
 @cli.command()

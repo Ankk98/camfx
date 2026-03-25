@@ -5,7 +5,7 @@
 Run the comprehensive feasibility test:
 
 ```bash
-# Basic test (uses /dev/video10, 1280x720@30fps)
+# Basic test (auto-discovers a v4l2loopback /dev/videoX node)
 python scripts/test_ffmpeg_v4l2_feasibility.py
 
 # Custom device and resolution
@@ -80,8 +80,8 @@ sudo usermod -aG video $USER
 
 ### "Device does not exist"
 ```bash
-# Load v4l2loopback module manually
-sudo modprobe v4l2loopback video_nr=10 exclusive_caps=1 card_label="camfx_test"
+# Load v4l2loopback module manually (let it pick a free /dev/videoX if supported)
+sudo modprobe v4l2loopback exclusive_caps=1 card_label="camfx_test" video_nr=-1
 ```
 
 ### "Module load failed"

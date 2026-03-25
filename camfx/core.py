@@ -7,8 +7,8 @@ import time
 from typing import Dict, List, Optional
 
 from .camera_devices import list_camera_devices, probe_camera_modes
-from .segmentation import PersonSegmenter
-from .output_pipewire import PipeWireOutput
+from .segmentation import PersonSegmenter, FaceDetector
+from .output_v4l2_ffmpeg import V4L2OutputFFmpeg
 from .control import EffectController
 
 logger = logging.getLogger('camfx.core')
@@ -29,10 +29,13 @@ class VideoEnhancer:
 		self._last_virtual_send_log = 0.0
 		self._virtual_frames_sent = 0
 		self._black_frames_sent = 0
+		self._last_seg_mask_debug_log = 0.0
 		self._last_effect_chain_signature: Optional[str] = None
 		self._virtual_warning_logged = False
 		
-		# Camera is not opened immediately - requires explicit start via D-Bus or CLI
+		# Camera start behavior:
+		# - if D-Bus is enabled, keep the previous behavior: camera starts OFF
+		# - if D-Bus is not enabled, start camera immediately for simpler usage
 		self.cap: Optional[cv2.VideoCapture] = None
 		self.camera_active = False
 		
@@ -47,18 +50,26 @@ class VideoEnhancer:
 		
 		# Segmentation will be initialized lazily when needed
 		self.segmenter: Optional[PersonSegmenter] = None
+		self.face_detector: Optional[FaceDetector] = None
 		
 		# Get target dimensions and FPS from config
 		self.target_fps = int(self.config.get('fps', 30))
 		self.enable_virtual = bool(self.config.get('enable_virtual', True))
 		self.camera_name = self.config.get('camera_name', 'camfx')
+		self.v4l2_device = self.config.get('v4l2_device', 'auto')
+		self.v4l2_card_label = self.config.get('v4l2_card_label', self.camera_name)
+		self.enable_dbus = bool(self.config.get('enable_dbus', False))
+		self.start_camera_immediately = bool(
+			self.config.get('start_camera_immediately', not self.enable_dbus)
+		)
 		
 		# Use config dimensions or defaults
 		target_width = self.config.get('width')
 		target_height = self.config.get('height')
 		self.width = target_width or 640
 		self.height = target_height or 480
-		print("Camera is off by default. Use D-Bus or CLI to start it.")
+		if self.enable_dbus and not self.start_camera_immediately:
+			print("Camera is off by default when using D-Bus. Use D-Bus/CLI to start it.")
 		self._log_checkpoint(
 			'init',
 			source=self.camera_source_id,
@@ -70,13 +81,13 @@ class VideoEnhancer:
 			camera_name=self.camera_name,
 		)
 		
-		# Virtual camera output via PipeWire (always initialize, even if camera not active)
+		# Virtual camera output via v4l2loopback (initialize even if camera isn't active)
 		self.virtual_cam = None
 		self._create_virtual_output()
 		
 		# Initialize D-Bus service if enabled
 		self.dbus_service = None
-		if self.config.get('enable_dbus', False):
+		if self.enable_dbus:
 			try:
 				from .dbus_control import CamfxControlService
 				self.dbus_service = CamfxControlService(self.effect_controller, self)
@@ -85,6 +96,13 @@ class VideoEnhancer:
 				print(f"Warning: Failed to start D-Bus service: {exc}")
 				print("Runtime effect control via D-Bus will not be available")
 				self.dbus_service = None
+
+		# Optionally start camera immediately (when not using D-Bus).
+		if self.start_camera_immediately and not self.camera_active:
+			try:
+				self._start_camera()
+			except Exception as exc:
+				logger.error("Auto-start camera failed: %s", exc, exc_info=True)
 	
 	def _get_effect_config(self, effect_type: str, config: dict | None) -> dict:
 		"""Extract effect-specific config from general config."""
@@ -155,10 +173,35 @@ class VideoEnhancer:
 				self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(self.config['width']))
 			if 'height' in self.config and self.config['height'] is not None:
 				self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(self.config['height']))
+
+			# High-res webcams often only reach high FPS in compressed modes
+			# (e.g. MJPG). If we stay on uncompressed formats (e.g. YUYV),
+			# capture throughput can collapse to ~2 FPS at 1080p.
+			# Try MJPG first for "large" resolutions.
+			try:
+				if self.width >= 1280 or self.height >= 720:
+					mjpg = cv2.VideoWriter_fourcc(*"MJPG")
+					self.cap.set(cv2.CAP_PROP_FOURCC, mjpg)
+			except Exception:
+				pass
+
+			# Try to set FPS. Some devices will ignore it if the chosen pixel
+			# format doesn't support the requested FPS.
+			try:
+				self.cap.set(cv2.CAP_PROP_FPS, float(self.target_fps))
+			except Exception:
+				pass
 			
 			# Update dimensions from actual camera
 			self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 			self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+			try:
+				actual_fps = float(self.cap.get(cv2.CAP_PROP_FPS)) or 0.0
+			except Exception:
+				actual_fps = 0.0
+			if actual_fps > 1.0:
+				# Use reported actual fps to keep output pacing consistent.
+				self.target_fps = int(round(actual_fps))
 			
 			self.camera_active = True
 			self._last_camera_state_log = time.time()
@@ -219,23 +262,23 @@ class VideoEnhancer:
 				height=self.height,
 				fps=self.target_fps,
 				name=self.camera_name,
+				device=self.v4l2_device,
 			)
-			print(f"Initializing PipeWire virtual camera ({self.width}x{self.height} @ {self.target_fps}fps)...")
-			self.virtual_cam = PipeWireOutput(
+			print(f"Initializing v4l2loopback virtual camera ({self.width}x{self.height} @ {self.target_fps}fps)...")
+			self.virtual_cam = V4L2OutputFFmpeg(
 				width=self.width,
 				height=self.height,
 				fps=self.target_fps,
 				name=self.camera_name,
+				device=self.v4l2_device,
+				card_label=self.v4l2_card_label,
 			)
-			print("PipeWire virtual camera ready")
+			print("v4l2 virtual camera ready")
 			self._log_checkpoint('virtual.create.success', name=self.camera_name)
 			self._virtual_warning_logged = False
 		except Exception as exc:
-			print(f"Warning: Failed to initialize PipeWire virtual camera: {exc}")
-			print("Continuing with preview only. To enable virtual camera:")
-			print("  1. Ensure PipeWire is running: systemctl --user status pipewire")
-			print("  2. Ensure wireplumber is running: systemctl --user start wireplumber")
-			print("  3. Or use --no-virtual to skip virtual camera initialization")
+			print(f"Warning: Failed to initialize v4l2 virtual camera: {exc}")
+			print("Continuing without virtual camera output. Ensure v4l2loopback is loaded and /dev/videoX is available.")
 			self.virtual_cam = None
 			self._log_checkpoint(
 				'virtual.create.failed',
@@ -397,9 +440,8 @@ class VideoEnhancer:
 					# Send a black frame when camera is off
 					if self.virtual_cam is not None:
 						black_frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-						frame_rgb = cv2.cvtColor(black_frame, cv2.COLOR_BGR2RGB)
 						try:
-							self.virtual_cam.send(frame_rgb.tobytes())
+							self.virtual_cam.send(black_frame.tobytes())
 							self.virtual_cam.sleep_until_next_frame()
 							self._black_frames_sent += 1
 							if self._black_frames_sent == 1 or now - self._last_black_frame_log >= 5.0:
@@ -463,23 +505,92 @@ class VideoEnhancer:
 				
 				# Determine if any effect in chain needs a mask
 				needs_mask = False
-				for effect, _ in chain.effects:
+				for effect, effect_config in chain.effects:
 					effect_class_name = effect.__class__.__name__
 					if effect_class_name in ['BackgroundBlur', 'BackgroundReplace']:
 						needs_mask = True
 						break
 					elif effect_class_name == 'BrightnessAdjustment':
-						if kwargs.get('face_only', False):
+						# "face_only" lives in the effect config, not in VideoEnhancer.run(**kwargs)
+						if bool(effect_config.get('face_only', False)):
 							needs_mask = True
 							break
 				
 				# Initialize segmenter if needed
 				if needs_mask and self.segmenter is None:
 					self._log_checkpoint('segmenter.init', reason='mask_required')
-					self.segmenter = PersonSegmenter()
+					try:
+						self.segmenter = PersonSegmenter()
+					except Exception as seg_init_err:
+						# Don't crash the daemon if MediaPipe is missing/broken; we can
+						# still run with mask=None (blur becomes full-frame; replace uses fallback).
+						logger.error("Failed to initialize segmenter: %s", seg_init_err, exc_info=True)
+						self._log_checkpoint(
+							'segmenter.init.failed',
+							level=logging.ERROR,
+							error=str(seg_init_err),
+						)
+						self.segmenter = None
 				
 				# Get mask if needed
-				mask = self.segmenter.get_mask(frame) if needs_mask else None
+				mask = None
+				if needs_mask and self.segmenter is not None:
+					try:
+						# MediaPipe Tasks' VIDEO-mode APIs are timestamp-driven.
+						# Use a small relative, monotonic timestamp rather than epoch-ms
+						# to avoid edge-case failures/empty results.
+						frame_period_ms = 1000.0 / max(float(self.target_fps), 1.0)
+						timestamp_ms = int(frame_count * frame_period_ms)
+						mask = self.segmenter.get_mask(frame, timestamp_ms)
+						# One-time-per-effect-chain debug: confirm mask isn't empty/inverted.
+						if mask is not None and mask.size > 0:
+							now = time.time()
+							if now - self._last_seg_mask_debug_log >= 2.0:
+								min_v = float(np.min(mask))
+								max_v = float(np.max(mask))
+								mean_v = float(np.mean(mask))
+								logger.info(
+									"segmenter.mask.stats min=%0.4f max=%0.4f mean=%0.4f",
+									min_v,
+									max_v,
+									mean_v,
+								)
+								self._last_seg_mask_debug_log = now
+
+								# If mask is inverted (face blurry), attempt correction
+								# using face-landmarker bbox.
+								try:
+									if self.face_detector is None:
+										self.face_detector = FaceDetector()
+									if self.face_detector is not None:
+										bbox = self.face_detector.get_face_bbox(frame, timestamp_ms, smooth=True)
+										if bbox is not None:
+											x, y, w, h = bbox
+											face_area = mask[y:y + h, x:x + w]
+											if face_area.size > 0:
+												face_mean = float(np.mean(face_area))
+												overall_mean = float(np.mean(mask))
+												# If face_mean is much lower than overall mask mean,
+												# assume mask == background and invert.
+												if face_mean + 0.05 < overall_mean:
+													mask = 1.0 - mask
+													self._log_checkpoint(
+														"segmenter.mask.inverted",
+														face_mean=face_mean,
+														overall_mean=overall_mean,
+														bbox=bbox,
+													)
+								except Exception:
+									# Best-effort only; never break processing.
+									pass
+					except Exception as seg_err:
+						logger.error("Segmentation mask failed: %s", seg_err, exc_info=True)
+						self._log_checkpoint(
+							'segmenter.mask.failed',
+							level=logging.ERROR,
+							error=str(seg_err),
+						)
+						mask = None
 				
 				# Apply effect chain
 				try:
@@ -496,8 +607,10 @@ class VideoEnhancer:
 				# Send to virtual camera
 				if self.virtual_cam is not None:
 					try:
-						frame_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
-						self.virtual_cam.send(frame_rgb.tobytes())
+						# virtual_cam expects bgr24 bytes (OpenCV native BGR).
+						if not processed.flags["C_CONTIGUOUS"]:
+							processed = np.ascontiguousarray(processed)
+						self.virtual_cam.send(processed.tobytes())
 						self.virtual_cam.sleep_until_next_frame()
 						self._virtual_frames_sent += 1
 						now = time.time()

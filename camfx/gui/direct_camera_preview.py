@@ -37,6 +37,12 @@ class DirectCameraPreview(Gtk.Box):
 		self._lock = threading.Lock()
 		self._capture: Optional[cv2.VideoCapture] = None
 		self._current_config: Optional[dict] = None
+		# Keep underlying bytes alive while the Pixbuf is using them.
+		self._last_frame_bytes: Optional[bytes] = None
+		# Throttle UI updates; decoding may be faster/slower than display.
+		self._max_ui_fps: float = 15.0
+		# Downscale frames for display to keep the UI responsive.
+		self._max_preview_side: int = 960
 	
 	def set_camera_config(self, config: dict):
 		"""Update camera configuration used for preview."""
@@ -122,8 +128,27 @@ class DirectCameraPreview(Gtk.Box):
 			cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
 		if height:
 			cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
+		
+		# High-res webcams often only sustain good FPS in compressed mode (MJPG).
+		try:
+			w_i = int(width) if width else 0
+			h_i = int(height) if height else 0
+		except Exception:
+			w_i, h_i = 0, 0
+
+		if (w_i >= 1280 or h_i >= 720):
+			try:
+				mjpg = cv2.VideoWriter_fourcc(*"MJPG")
+				cap.set(cv2.CAP_PROP_FOURCC, mjpg)
+			except Exception:
+				pass
+		
+		# Set FPS after FOURCC to give the device a better chance to accept it.
 		if fps:
-			cap.set(cv2.CAP_PROP_FPS, int(fps))
+			try:
+				cap.set(cv2.CAP_PROP_FPS, int(fps))
+			except Exception:
+				pass
 		return cap
 	
 	def _preview_loop(self):
@@ -138,14 +163,22 @@ class DirectCameraPreview(Gtk.Box):
 			self._capture = cap
 		
 		self._update_status("Preview: Running")
-		
+
+		# Throttle UI updates to avoid overwhelming the GTK main loop.
+		last_ui_update = 0.0
+		min_ui_period = 1.0 / max(self._max_ui_fps, 1.0)
+
 		while self._running:
 			ret, frame = cap.read()
 			if not ret or frame is None:
-				time.sleep(0.05)
+				time.sleep(0.01)
 				continue
-			
-			GLib.idle_add(self._update_frame, frame.copy())
+
+			now = time.time()
+			if now - last_ui_update >= min_ui_period:
+				last_ui_update = now
+				# No frame.copy(): cap.read() returns a new numpy array each time.
+				GLib.idle_add(self._update_frame, frame)
 		
 		self._release_capture()
 	
@@ -162,12 +195,27 @@ class DirectCameraPreview(Gtk.Box):
 		if frame is None:
 			return
 		try:
+			# Downscale for display (biggest cost is color conversion + pixbuf creation).
+			h, w = frame.shape[:2]
+			if w > 0 and h > 0:
+				scale = min(
+					1.0,
+					float(self._max_preview_side) / float(max(w, h)),
+				)
+				if scale < 1.0:
+					new_w = max(1, int(w * scale))
+					new_h = max(1, int(h * scale))
+					frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
 			frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 			if not frame_rgb.flags['C_CONTIGUOUS']:
 				frame_rgb = np.ascontiguousarray(frame_rgb)
 			height, width = frame_rgb.shape[:2]
+			# new_from_data may not copy, so keep the bytes alive.
+			self._last_frame_bytes = frame_rgb.tobytes()
+
 			pixbuf = GdkPixbuf.Pixbuf.new_from_data(
-				frame_rgb.tobytes(),
+				self._last_frame_bytes,
 				GdkPixbuf.Colorspace.RGB,
 				False,
 				8,

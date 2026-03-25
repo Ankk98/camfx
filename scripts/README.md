@@ -11,7 +11,7 @@
 ```
 Automated readiness check (~2 seconds):
 - Verifies OBS installed
-- Checks PipeWire running
+- Checks v4l2loopback device available
 - Tests all dependencies
 
 ### Full Test

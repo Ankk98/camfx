@@ -1,6 +1,8 @@
 import cv2
 import numpy as np
+import time
 from .segmentation import FaceDetector
+from .mediapipe_tasks import face_landmarks_from_bgr
 
 
 class BackgroundBlur:
@@ -8,7 +10,9 @@ class BackgroundBlur:
 		if strength <= 0:
 			raise ValueError(f"Strength must be positive, got {strength}")
 		if strength % 2 == 0:
-			raise ValueError(f"Strength must be odd (Gaussian blur requires odd kernel size), got {strength}. Use an odd number like {strength + 1} or {strength - 1}")
+			# Be forgiving: users (and UIs) often use even numbers.
+			# OpenCV requires an odd kernel size for GaussianBlur.
+			strength = int(strength) + 1
 		frame_f = frame.astype(np.float32)
 		
 		# If no mask provided, blur the entire frame
@@ -24,9 +28,17 @@ class BackgroundBlur:
 
 
 class BackgroundReplace:
-	def apply(self, frame: np.ndarray, mask: np.ndarray, background: np.ndarray) -> np.ndarray:
+	def apply(self, frame: np.ndarray, mask: np.ndarray | None, background: np.ndarray) -> np.ndarray:
 		if background is None:
 			raise ValueError("Background image is not loaded or invalid.")
+
+		# Fallback when segmentation mask isn't available:
+		# replace the entire frame with the provided background.
+		# This keeps the effect from hard-failing when MediaPipe is not installed.
+		if mask is None:
+			bg = cv2.resize(background, (frame.shape[1], frame.shape[0])).astype(np.float32)
+			return np.clip(bg, 0, 255).astype(np.uint8)
+
 		frame_f = frame.astype(np.float32)
 		mask_f = np.clip(mask.astype(np.float32), 0.0, 1.0)
 		bg = cv2.resize(background, (frame.shape[1], frame.shape[0])).astype(np.float32)
@@ -81,13 +93,7 @@ class FaceBeautification:
 	bilateral filtering for natural-looking skin smoothing.
 	"""
 	def __init__(self):
-		import mediapipe as mp
-		self.face_mesh = mp.solutions.face_mesh.FaceMesh(
-			max_num_faces=1,
-			refine_landmarks=True,
-			min_detection_confidence=0.5,
-			min_tracking_confidence=0.5
-		)
+		self._last_timestamp_ms = 0
 	
 	def apply(self, frame: np.ndarray, mask: np.ndarray | None = None, smoothness: int = 5) -> np.ndarray:
 		"""
@@ -101,20 +107,21 @@ class FaceBeautification:
 		# Ensure odd number for bilateral filter
 		if smoothness % 2 == 0:
 			smoothness += 1
-		
-		# Convert to RGB for MediaPipe
-		frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-		results = self.face_mesh.process(frame_rgb)
-		
-		if results.multi_face_landmarks:
-			# Get face landmarks
-			face_landmarks = results.multi_face_landmarks[0]
+
+		# Tasks-based face landmarks (no mediapipe.solutions dependency).
+		now_ms = int(time.time() * 1000)
+		if now_ms <= self._last_timestamp_ms:
+			now_ms = self._last_timestamp_ms + 1
+		self._last_timestamp_ms = now_ms
+
+		face_landmarks = face_landmarks_from_bgr(frame, now_ms)
+		if face_landmarks is not None:
 			h, w = frame.shape[:2]
 			
 			# Extract face region using landmarks
 			# Get face contour points (approximate face oval)
 			face_points = []
-			for landmark in face_landmarks.landmark:
+			for landmark in face_landmarks:
 				x = int(landmark.x * w)
 				y = int(landmark.y * h)
 				face_points.append([x, y])
@@ -161,7 +168,7 @@ class AutoFraming:
 			max_zoom: Maximum zoom level
 		"""
 		h, w = frame.shape[:2]
-		bbox = self.face_detector.get_face_bbox(frame, smooth=True)
+		bbox = self.face_detector.get_face_bbox(frame, int(time.time() * 1000), smooth=True)
 		
 		if bbox is None:
 			# No face detected, return original
@@ -226,13 +233,7 @@ class EyeGazeCorrection:
 	to warp eye regions for natural-looking gaze correction.
 	"""
 	def __init__(self):
-		import mediapipe as mp
-		self.face_mesh = mp.solutions.face_mesh.FaceMesh(
-			max_num_faces=1,
-			refine_landmarks=True,  # Required for iris landmarks
-			min_detection_confidence=0.5,
-			min_tracking_confidence=0.5
-		)
+		self._last_timestamp_ms = 0
 		# MediaPipe Face Mesh landmark indices
 		# Left eye landmarks (outer to inner)
 		self.LEFT_EYE_INDICES = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246]
@@ -254,7 +255,7 @@ class EyeGazeCorrection:
 		"""
 		h, w = frame.shape[:2]
 		eye_points = np.array([
-			[int(landmarks.landmark[i].x * w), int(landmarks.landmark[i].y * h)]
+			[int(landmarks[i].x * w), int(landmarks[i].y * h)]
 			for i in eye_indices
 		], dtype=np.int32)
 		
@@ -273,7 +274,7 @@ class EyeGazeCorrection:
 		"""Calculate center of eye socket from landmarks."""
 		h, w = frame_shape[:2]
 		eye_points = np.array([
-			[landmarks.landmark[i].x * w, landmarks.landmark[i].y * h]
+			[landmarks[i].x * w, landmarks[i].y * h]
 			for i in eye_indices
 		])
 		center_x = int(np.mean(eye_points[:, 0]))
@@ -317,24 +318,25 @@ class EyeGazeCorrection:
 			strength: Correction strength (0.0-1.0, higher = more correction)
 		"""
 		strength = np.clip(strength, 0.0, 1.0)
-		
-		# Convert to RGB for MediaPipe
-		frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-		results = self.face_mesh.process(frame_rgb)
-		
-		if not results.multi_face_landmarks:
+
+		now_ms = int(time.time() * 1000)
+		if now_ms <= self._last_timestamp_ms:
+			now_ms = self._last_timestamp_ms + 1
+		self._last_timestamp_ms = now_ms
+
+		face_landmarks = face_landmarks_from_bgr(frame, now_ms)
+		if face_landmarks is None:
 			# Reset smoothing state when face is lost
 			self.last_left_iris_pos = None
 			self.last_right_iris_pos = None
 			return frame
 		
-		face_landmarks = results.multi_face_landmarks[0]
 		h, w = frame.shape[:2]
 		result_frame = frame.copy()
 		
 		# Get iris positions
-		left_iris = face_landmarks.landmark[self.LEFT_IRIS_CENTER]
-		right_iris = face_landmarks.landmark[self.RIGHT_IRIS_CENTER]
+		left_iris = face_landmarks[self.LEFT_IRIS_CENTER]
+		right_iris = face_landmarks[self.RIGHT_IRIS_CENTER]
 		left_iris_pos_raw = (int(left_iris.x * w), int(left_iris.y * h))
 		right_iris_pos_raw = (int(right_iris.x * w), int(right_iris.y * h))
 		
