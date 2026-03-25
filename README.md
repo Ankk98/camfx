@@ -157,6 +157,13 @@ camfx gui
 
 The GUI expects `camfx start --dbus` to control camera/effects. It also lets you toggle preview.
 
+### Screenshots
+Step 1 (open the GUI and connect preview):  
+![camfx GUI - step 1](screenshots/v0.2-gui-step1.png)
+
+Step 2 (fullscreen preview):  
+![camfx GUI - step 2](screenshots/v0.2-gui-step2.png)
+
 ## Performance notes
 - `camfx` outputs frames to v4l2loopback via FFmpeg. Your achievable FPS depends on:
   - camera supported formats (compressed MJPEG vs raw YUYV, etc.)
