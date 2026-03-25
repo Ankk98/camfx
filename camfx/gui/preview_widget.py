@@ -93,6 +93,7 @@ class PreviewWidget(Gtk.Box):
 		
 		# Fullscreen window
 		self.fullscreen_window: Optional[Gtk.Window] = None
+		self._fullscreen_key_controller: Optional[Gtk.EventControllerKey] = None
 	
 	def start_preview(self):
 		"""Start preview thread."""
@@ -342,6 +343,7 @@ class PreviewWidget(Gtk.Box):
 			# Close fullscreen window
 			self.fullscreen_window.destroy()
 			self.fullscreen_window = None
+			self._fullscreen_key_controller = None
 		else:
 			# Open fullscreen window
 			self.fullscreen_window = Gtk.Window()
@@ -360,11 +362,38 @@ class PreviewWidget(Gtk.Box):
 			
 			# Handle window close
 			self.fullscreen_window.connect("close-request", self._on_fullscreen_close)
+
+			# Handle Escape key to close fullscreen.
+			# Gtk4 uses EventControllerKey for key events.
+			self._fullscreen_key_controller = Gtk.EventControllerKey()
+			self._fullscreen_key_controller.connect("key-pressed", self._on_fullscreen_key_pressed)
+			self.fullscreen_window.add_controller(self._fullscreen_key_controller)
+			# Ensure the fullscreen window receives keyboard input.
+			self.fullscreen_window.set_can_focus(True)
+			self.fullscreen_window.grab_focus()
+
 			self.fullscreen_window.present()
+
+	def _on_fullscreen_key_pressed(
+		self,
+		controller: Gtk.EventControllerKey,
+		keyval: int,
+		keycode: int,
+		state: int,
+	) -> bool:
+		"""Close fullscreen when Escape is pressed."""
+		if keyval == Gdk.KEY_Escape:
+			if self.fullscreen_window:
+				self.fullscreen_window.destroy()
+				self.fullscreen_window = None
+				self._fullscreen_key_controller = None
+			return True
+		return False
 	
 	def _on_fullscreen_close(self, window: Gtk.Window) -> bool:
 		"""Handle fullscreen window close."""
 		self.fullscreen_window = None
+		self._fullscreen_key_controller = None
 		return False
 	
 	def do_destroy(self):
