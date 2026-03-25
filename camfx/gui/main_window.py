@@ -74,6 +74,11 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 		
 		# Sync previews (both default OFF)
 		self._initialize_preview_state()
+		
+		# Watch camfx D-Bus availability so the GUI reflects daemon restarts.
+		# This avoids stale state when the service disappears and comes back.
+		self._dbus_watchdog_source_id: Optional[int] = None
+		self._start_dbus_watchdog()
 	
 	def _build_ui(self):
 		"""Build the user interface."""
@@ -223,6 +228,131 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 		self._update_direct_preview_config()
 		self._sync_direct_preview()
 		self._sync_preview_widget()
+
+	def _start_dbus_watchdog(self) -> None:
+		"""Poll camfx D-Bus health and refresh UI on restarts."""
+		# Already running
+		if self._dbus_watchdog_source_id is not None:
+			return
+		
+		try:
+			# Poll interval: short enough to feel responsive, long enough to be cheap.
+			self._dbus_watchdog_source_id = GLib.timeout_add_seconds(2, self._poll_dbus_health)
+		except Exception as e:
+			# Worst case: GUI behaves like before (no restart auto-sync), but should not crash.
+			logger.error("Failed to start D-Bus watchdog: %s", e, exc_info=True)
+			self._dbus_watchdog_source_id = None
+
+	def _stop_dbus_watchdog(self) -> None:
+		"""Stop camfx D-Bus watchdog timer."""
+		if self._dbus_watchdog_source_id is not None:
+			try:
+				GLib.source_remove(self._dbus_watchdog_source_id)
+			except Exception:
+				pass
+			self._dbus_watchdog_source_id = None
+
+	def _update_dbus_status(self, is_connected: bool) -> None:
+		"""Update UI elements related to D-Bus connectivity."""
+		if not hasattr(self, "status_label"):
+			return
+		try:
+			self.status_label.set_text("D-Bus: Connected" if is_connected else "D-Bus: Not connected")
+		except Exception:
+			# If the label API changes, fail silently.
+			pass
+		try:
+			if is_connected:
+				self.status_label.add_css_class("success")
+				self.status_label.remove_css_class("error")
+			else:
+				self.status_label.add_css_class("error")
+				self.status_label.remove_css_class("success")
+		except Exception:
+			pass
+
+		# Camera control should be disabled when D-Bus is unavailable.
+		try:
+			if hasattr(self, "camera_toggle"):
+				self.camera_toggle.set_sensitive(is_connected)
+		except Exception:
+			pass
+
+	def _try_reconnect_dbus(self) -> bool:
+		"""Attempt to (re)create the D-Bus client and reconnect signals."""
+		try:
+			self.dbus_client = CamfxDBusClient()
+			self.connected = True
+			self.dbus_client.connect_signals(
+				on_effect_changed=self._on_effect_changed,
+				on_camera_state_changed=self._on_camera_state_changed,
+				on_camera_config_changed=self._on_camera_config_changed,
+			)
+			self._update_dbus_status(True)
+
+			# Effect chain widget keeps its own dbus_client reference.
+			if hasattr(self, "effect_chain") and hasattr(self.effect_chain, "dbus_client"):
+				try:
+					self.effect_chain.dbus_client = self.dbus_client
+				except Exception:
+					pass
+			return True
+		except Exception:
+			self.dbus_client = None
+			self.connected = False
+			self._update_dbus_status(False)
+			return False
+
+	def _poll_dbus_health(self) -> bool:
+		"""Periodic D-Bus watchdog tick (must be GTK thread safe)."""
+		# Keep polling until the window is destroyed.
+		was_connected = bool(self.connected)
+
+		# Reconnect if needed.
+		if not self.dbus_client or not self.connected:
+			self._try_reconnect_dbus()
+
+		if not self.dbus_client or not self.connected:
+			# Ensure preview doesn't keep running while D-Bus is gone.
+			try:
+				if hasattr(self, "preview_widget") and self.preview_toggle.get_active():
+					self.preview_widget.stop_preview(reason="D-Bus disconnected")
+			except Exception:
+				pass
+			return True
+
+		# Validate daemon state via a cheap call.
+		try:
+			is_active = bool(self.dbus_client.get_camera_state())
+			if not was_connected:
+				# Fresh connection: reload camera config + effects once.
+				try:
+					self._load_initial_camera_data()
+				except Exception:
+					pass
+				try:
+					if hasattr(self, "effect_chain") and hasattr(self.effect_chain, "refresh"):
+						self.effect_chain.dbus_client = self.dbus_client
+						self.effect_chain.refresh()
+				except Exception:
+					pass
+				# Always sync camera toggle label/state on reconnect.
+				self._handle_camera_state_change(is_active)
+			else:
+				# Sync UI state if it changed.
+				if is_active != self.camera_state_active:
+					self._handle_camera_state_change(is_active)
+			return True
+		except Exception:
+			# Service likely disappeared (daemon restart).
+			self.connected = False
+			self.camera_state_active = False
+			self._update_dbus_status(False)
+			try:
+				self._sync_preview_widget(restart=False)
+			except Exception:
+				pass
+			return True
 	
 	def _build_camera_settings(self, parent: Gtk.Box):
 		"""Create camera source/resolution/fps selectors."""
@@ -734,8 +864,14 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 		if not self.preview_toggle.get_active():
 			self.preview_widget.show_preview_disabled_message()
 			return
-		
-		if self.connected and not self.camera_state_active:
+
+		# If camfx isn't reachable via D-Bus, stop preview to keep the GUI safe
+		# and to avoid stale state during daemon restarts.
+		if not self.connected or not self.dbus_client:
+			self.preview_widget.stop_preview(reason="D-Bus disconnected")
+			return
+
+		if not self.camera_state_active:
 			self.preview_widget.show_camera_inactive_message()
 			return
 		
@@ -899,6 +1035,7 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 	def do_close_request(self):
 		"""Handle window close request."""
 		logger.info("Window close requested, releasing all resources")
+		self._stop_dbus_watchdog()
 		# Release resources based on current step
 		if self.current_step == 1:
 			self._release_step1_resources()

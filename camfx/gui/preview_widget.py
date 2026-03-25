@@ -99,6 +99,17 @@ class PreviewWidget(Gtk.Box):
 		if self.running:
 			logger.warning("Preview already running, ignoring start request")
 			return
+
+		# If a previous stop request timed out, the old thread may still be
+		# blocked in cv2.read(). Don't start a second preview thread (and don't
+		# create a second VideoCapture) until the first one exits.
+		if self.preview_thread and self.preview_thread.is_alive():
+			logger.warning("Preview thread still shutting down; ignoring start request")
+			self._update_status("Preview: Restart pending")
+			return
+
+		if self.preview_thread and not self.preview_thread.is_alive():
+			self.preview_thread = None
 		
 		logger.info(f"Starting preview for source '{self.source_name}'")
 		self.running = True
@@ -122,19 +133,31 @@ class PreviewWidget(Gtk.Box):
 		else:
 			logger.info("Stopping preview (%s)", reason or "already stopped")
 		
+		# Important: stop the thread before releasing cv2.VideoCapture.
+		# Releasing capture while the preview thread is mid-read can trigger
+		# C-level crashes (segfault) in some OpenCV/V4L2 builds.
 		self.running = False
+
+		thread = self.preview_thread
+		if thread and thread.is_alive():
+			thread.join(timeout=2.0)
+			if thread.is_alive():
+				# Thread is still blocked in cv2 read(). Do NOT release the capture
+				# here; let the preview thread clean it up when it can exit.
+				logger.warning(
+					"Preview thread did not stop within timeout; "
+					"keeping capture released deferred to preview thread"
+				)
+				message = reason or "Preview: Not connected"
+				self._show_placeholder(message)
+				self._placeholder_displayed = True
+				self._last_placeholder_reason = reason
+				return
+
+		# Thread is stopped (or was never running). Now safe to release.
+		self.preview_thread = None
 		self._release_capture()
-		if self.preview_thread:
-			self.preview_thread.join(timeout=2.0)
-			if self.preview_thread.is_alive():
-				logger.warning("Preview thread did not stop within timeout")
-				# Give thread a bit more time before detaching
-				self.preview_thread.join(timeout=1.0)
-				if self.preview_thread.is_alive():
-					logger.error("Preview thread stuck; continuing shutdown")
-			else:
-				logger.debug("Preview thread stopped")
-			self.preview_thread = None
+
 		message = reason or "Preview: Not connected"
 		self._show_placeholder(message)
 		self._placeholder_displayed = True
@@ -283,9 +306,12 @@ class PreviewWidget(Gtk.Box):
 			if not frame_rgb.flags['C_CONTIGUOUS']:
 				frame_rgb = np.ascontiguousarray(frame_rgb)
 			
-			# Create pixbuf
+			# Create pixbuf.
+			# Keep the underlying byte buffer alive as long as the pixbuf might
+			# reference it (new_from_data does not necessarily copy).
+			self._last_frame_bytes = frame_rgb.tobytes()
 			pixbuf = GdkPixbuf.Pixbuf.new_from_data(
-				frame_rgb.tobytes(),
+				self._last_frame_bytes,
 				GdkPixbuf.Colorspace.RGB,
 				False,
 				8,
