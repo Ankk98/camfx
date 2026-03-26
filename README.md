@@ -49,6 +49,30 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
+### Fedora (RPM from GitHub Release)
+For `v0.2.0a1`, download the RPM from GitHub Releases, then:
+
+```bash
+cd ~/Downloads
+sudo dnf install -y ./camfx-0.2.0a1-*.x86_64.rpm
+systemctl --user daemon-reload
+systemctl --user enable --now camfx
+systemctl --user status camfx --no-pager
+```
+
+The Fedora RPM also installs a GNOME app launcher (`camfx`) for the GUI.
+
+Important for `v0.2.0a1`: configure V4L2 loopback manually first:
+
+```bash
+sudo dnf install -y v4l2loopback akmod-v4l2loopback v4l-utils
+sudo modprobe v4l2loopback exclusive_caps=1 card_label="camfx" video_nr=-1
+v4l2-ctl --list-devices
+```
+
+Release notes/install snippet for maintainers:
+- `docs/releases/v0.2.0a1.md`
+
 Optional extras:
 - GUI:
   - `pip install -e ".[gui]"`

@@ -1,3 +1,5 @@
 include camfx/resources/*.jpg
 recursive-include camfx/resources *.jpg
+include packaging/fedora/camfx.service
+include packaging/fedora/camfx.desktop
 

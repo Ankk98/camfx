@@ -4,6 +4,7 @@ import glob
 import io
 import logging
 import os
+import signal
 import sys
 import uuid
 from datetime import datetime
@@ -165,11 +166,22 @@ def start(input_index: int, width: int | None, height: int | None, fps: int, nam
 			'enable_dbus': dbus,
 		},
 	)
-	
+
+	def _signal_to_keyboard_interrupt(signum, frame):
+		raise KeyboardInterrupt()
+
+	old_sigterm = signal.getsignal(signal.SIGTERM)
+	old_sigint = signal.getsignal(signal.SIGINT)
+	signal.signal(signal.SIGTERM, _signal_to_keyboard_interrupt)
+	signal.signal(signal.SIGINT, _signal_to_keyboard_interrupt)
+
 	try:
 		enhancer.run(preview=False)
 	except KeyboardInterrupt:
 		print("Stopped")
+	finally:
+		signal.signal(signal.SIGTERM, old_sigterm)
+		signal.signal(signal.SIGINT, old_sigint)
 
 
 @cli.command('preview-camera')

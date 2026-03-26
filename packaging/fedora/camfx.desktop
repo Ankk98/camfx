@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=camfx
+Comment=Virtual camera effects control panel
+Exec=camfx gui
+Icon=camera-web
+Terminal=false
+Categories=AudioVideo;Video;
+Keywords=camera;webcam;effects;virtual;

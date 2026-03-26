@@ -1,0 +1,15 @@
+[Unit]
+Description=camfx Virtual Camera Service
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/camfx start --dbus --name camfx --input 0 --fps 30
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=default.target
