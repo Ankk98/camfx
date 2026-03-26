@@ -186,6 +186,12 @@ ls -l /dev/video*
 If auto-discovery fails, pass an explicit node:
 - `camfx start --v4l2-device /dev/videoX ...`
 
+If `/dev/videoX` exists but GNOME Camera/other PipeWire apps do not show it yet,
+restart user services so PipeWire/WirePlumber re-discover the node:
+```bash
+systemctl --user restart pipewire wireplumber xdg-desktop-portal xdg-desktop-portal-gnome
+```
+
 ### Permissions
 If opening `/dev/videoX` fails:
 ```bash

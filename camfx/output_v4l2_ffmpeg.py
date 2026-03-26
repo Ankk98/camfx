@@ -25,7 +25,8 @@ logger = logging.getLogger("camfx.output_v4l2_ffmpeg")
 class V4L2OutputConfig:
 	device: str = "auto"  # "auto" resolves by card_label
 	card_label: str = "camfx"  # used for auto-resolution
-	pix_fmt: str = "yuv420p"  # output pixel format for v4l2
+	# YUYV tends to negotiate more reliably with Linux camera apps (e.g. GNOME Camera).
+	pix_fmt: str = "yuyv422"  # output pixel format for v4l2
 	ffmpeg_loglevel: str = "error"
 
 
