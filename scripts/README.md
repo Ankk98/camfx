@@ -2,6 +2,7 @@
 
 ## Diagnostics
 - `collect_diagnostics.sh` - System diagnostics for troubleshooting
+- `test_pipewire_v4l2loopback.sh` - Tests `/dev/videoX` loopback via PipeWire (`pipewiresrc`)
 
 ## OBS Testing (Firefox Compatibility)
 
