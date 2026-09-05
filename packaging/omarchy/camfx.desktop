@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=camfx
+Comment=Virtual camera effects control panel (Omarchy — UWSM wrapped)
+Exec=uwsm-app -- camfx gui
+Icon=camera-web
+Terminal=false
+Categories=AudioVideo;Video;
+Keywords=camera;webcam;effects;virtual;omarchy;
+StartupWMClass=org.camfx.ControlPanel

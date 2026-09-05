@@ -1,0 +1,7 @@
+#!/bin/bash
+# omarchy:summary=Camera effects — Omarchy plugin (toggle, effects, theme-sync, doctor)
+# omarchy:group=camfx
+# omarchy:args=[status|toggle|effect|theme-sync|doctor|gui|config|install|uninstall|reload] [args...]
+# omarchy:examples=omarchy camfx status --json | omarchy camfx toggle | omarchy camfx effect toggle blur
+set -euo pipefail
+exec python3 -m camfx_omarchy.cli "$@"

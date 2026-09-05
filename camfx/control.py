@@ -195,12 +195,83 @@ class EffectChain:
 
 
 class EffectController:
-	"""Thread-safe controller for managing effects."""
-	
-	def __init__(self):
+	"""Thread-safe controller for managing effects.
+
+	Persistence: when ``CAMFX_PERSIST`` (default 1) and a state file exists,
+	the last chain is auto-restored on init and every mutating call re-saves
+	to ``~/.local/state/camfx/state.json`` (Q22, Q19 JSON/machine-state).
+	Set ``CAMFX_PERSIST=0`` or ``CAMFX_STATE_FILE=/tmp/...`` in tests to isolate.
+	"""
+
+	def __init__(self, persist: bool | None = None):
 		self.chain = EffectChain()
 		self.lock = threading.Lock()
+		# Decide persistence opt-in: env CAMFX_PERSIST=0 disables, and never persist under pytest (Q22)
+		if persist is None:
+			import os
+			if "PYTEST_CURRENT_TEST" in os.environ:
+				persist = False
+			else:
+				persist = os.environ.get("CAMFX_PERSIST", "1") != "0"
+		self._persist_enabled = bool(persist)
+		if self._persist_enabled:
+			self._restore_state()
 	
+	def _effects_to_persistable(self) -> list[dict]:
+		"""Serialize current chain to JSON-friendly list for state file."""
+		# Map class names back to effect_type keys
+		class_to_type = {
+			'BackgroundBlur': 'blur',
+			'BackgroundReplace': 'replace',
+			'BrightnessAdjustment': 'brightness',
+			'FaceBeautification': 'beautify',
+			'AutoFraming': 'autoframe',
+			'EyeGazeCorrection': 'gaze-correct',
+		}
+		out: list[dict] = []
+		for effect, config in self.chain.effects:
+			etype = class_to_type.get(effect.__class__.__name__, 'unknown')
+			# config may contain numpy arrays or non-serializable background; filter to JSON-safe
+			safe_cfg: dict = {}
+			for k, v in config.items():
+				# Drop binary background arrays — they'll be re-derived from image path if present
+				if k == "background":
+					continue
+				try:
+					import json
+					json.dumps(v)
+					safe_cfg[k] = v
+				except Exception:
+					safe_cfg[k] = str(v)
+			out.append({"type": etype, "config": safe_cfg})
+		return out
+
+	def _persist_state(self) -> None:
+		if not self._persist_enabled:
+			return
+		try:
+			from .state import save_state
+			save_state(self._effects_to_persistable())
+		except Exception:
+			pass
+
+	def _restore_state(self) -> None:
+		try:
+			from .state import load_state
+			data = load_state()
+			if not data or not data.get("effects"):
+				return
+			for item in data["effects"]:
+				etype = item.get("type")
+				cfg = item.get("config", {})
+				if etype:
+					try:
+						self.chain.add_effect(etype, cfg)
+					except Exception:
+						continue
+		except Exception:
+			pass
+
 	def set_effect(self, effect_type: str, config: Dict[str, Any]):
 		"""Replace all effects with a single effect.
 		
@@ -211,6 +282,7 @@ class EffectController:
 		with self.lock:
 			self.chain.clear()
 			self.chain.add_effect(effect_type, config)
+		self._persist_state()
 	
 	def add_effect(self, effect_type: str, config: Dict[str, Any]) -> bool:
 		"""Add an effect to the chain.
@@ -223,7 +295,10 @@ class EffectController:
 			True if effect was added, False if duplicate was detected
 		"""
 		with self.lock:
-			return self.chain.add_effect(effect_type, config)
+			ok = self.chain.add_effect(effect_type, config)
+		if ok:
+			self._persist_state()
+		return ok
 	
 	def remove_effect(self, index: int):
 		"""Remove an effect from the chain by index.
@@ -233,6 +308,7 @@ class EffectController:
 		"""
 		with self.lock:
 			self.chain.remove_effect(index)
+		self._persist_state()
 	
 	def remove_effect_by_type(self, effect_type: str) -> bool:
 		"""Remove an effect from the chain by type.
@@ -244,12 +320,16 @@ class EffectController:
 			True if effect was found and removed, False otherwise
 		"""
 		with self.lock:
-			return self.chain.remove_effect_by_type(effect_type)
+			ok = self.chain.remove_effect_by_type(effect_type)
+		if ok:
+			self._persist_state()
+		return ok
 	
 	def clear_chain(self):
 		"""Clear all effects from the chain."""
 		with self.lock:
 			self.chain.clear()
+		self._persist_state()
 	
 	def get_chain(self) -> EffectChain:
 		"""Get current effect chain (thread-safe copy).
@@ -287,6 +367,9 @@ class EffectController:
 				}
 				if effect_class_name == expected_class_names.get(effect_type):
 					config[parameter] = value
-					return
-			raise ValueError(f"Effect type '{effect_type}' not found in chain")
+					found = True
+					break
+			else:
+				raise ValueError(f"Effect type '{effect_type}' not found in chain")
+		self._persist_state()
 

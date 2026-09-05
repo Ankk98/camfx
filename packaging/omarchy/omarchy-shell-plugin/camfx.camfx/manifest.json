@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "camfx.camfx",
+  "name": "Camfx",
+  "version": "0.2.0",
+  "author": "camfx",
+  "description": "Camera effects — virtual camera status and quick toggles (Omarchy plugin registry, iterative)",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Camfx.qml"
+  },
+  "barWidget": {
+    "displayName": "Camfx",
+    "description": "Toggle camera, cycle effects (right-click GUI, middle cycle). Keyboard-first: SUPER ALT+C/B/R/G.",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

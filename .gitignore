@@ -51,6 +51,12 @@ Thumbs.db
 tmp/
 logs/
 
+# Omarchy / Arch packaging artifacts (local VM builds, not to commit)
+*.pkg.tar.zst
+*.pkg.tar.xz
+*.src.tar.gz
+*.log.*
+
 
 # Dependency sources
 dependency_sources/

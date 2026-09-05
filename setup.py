@@ -6,6 +6,7 @@ setup(
 	packages=find_packages(exclude=['tests', 'tests.*']),
 	package_data={
 		'camfx': ['resources/*.jpg'],
+		'camfx_omarchy': ['hooks/*.sh', 'bindings/*.lua', 'systemd/*.service', 'templates/*', 'shell_plugin/camfx.camfx/*'],
 	},
 	include_package_data=True,
 	install_requires=[
@@ -24,12 +25,29 @@ setup(
 			'dbus-python>=1.2.18',
 			'PyGObject>=3.42.0',
 		],
+		# Omarchy integration (plugin registry, theme adapter, bar widget)
+		# Pure python (tomllib) — no extra runtime deps on Omarchy's Python 3.11+.
+		# Optional backport for older interpreters:
+		'omarchy': [],
+		'all': [
+			'PyGObject>=3.42.0',
+			'dbus-python>=1.2.18',
+		],
 	},
 	entry_points={
 		'console_scripts': [
 			'camfx=camfx.cli:cli',
+			'omarchy-camfx=camfx_omarchy.cli:main',
 		],
 	},
+	scripts=[
+		'bin/omarchy-camfx',
+		'bin/omarchy-camfx-status',
+		'bin/omarchy-camfx-toggle',
+		'bin/omarchy-camfx-theme-sync',
+		'bin/omarchy-camfx-doctor',
+		'bin/omarchy-camfx-gui',
+	],
 	license='MIT',
 )
 

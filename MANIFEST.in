@@ -2,4 +2,7 @@ include camfx/resources/*.jpg
 recursive-include camfx/resources *.jpg
 include packaging/fedora/camfx.service
 include packaging/fedora/camfx.desktop
+recursive-include camfx_omarchy *.sh *.lua *.service *.tpl
+recursive-include packaging/omarchy *
+include bin/omarchy-camfx*
 
