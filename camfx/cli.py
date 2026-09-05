@@ -491,7 +491,8 @@ def remove_effect(index, effect):
 
 
 @cli.command('get-effects')
-def get_effects():
+@click.option('--json', 'as_json', is_flag=True, default=False, help='Output JSON array')
+def get_effects(as_json: bool):
 	"""Get current effect chain via D-Bus."""
 	try:
 		import dbus
@@ -500,6 +501,14 @@ def get_effects():
 		control = dbus.Interface(service, 'org.camfx.Control1')
 		
 		effects = control.GetCurrentEffects()
+		if as_json:
+			import json
+			arr = [
+				{"type": str(etype), "class": str(klass), "config": dict(cfg)}
+				for etype, klass, cfg in effects
+			]
+			print(json.dumps(arr))
+			return
 		if not effects:
 			print("No effects in chain")
 		else:
@@ -563,7 +572,8 @@ def camera_stop():
 
 
 @cli.command('camera-status')
-def camera_status():
+@click.option('--json', 'as_json', is_flag=True, default=False, help='Output machine-readable JSON')
+def camera_status(as_json: bool):
 	"""Get camera status via D-Bus."""
 	try:
 		import dbus
@@ -571,18 +581,192 @@ def camera_status():
 		service = bus.get_object('org.camfx.Control1', '/org/camfx/Control1')
 		control = dbus.Interface(service, 'org.camfx.Control1')
 		
-		is_active = control.GetCameraState()
+		is_active = bool(control.GetCameraState())
+		if as_json:
+			import json
+			print(json.dumps({"active": is_active, "available": True}))
+			return
 		if is_active:
 			print("Camera is ON")
 		else:
 			print("Camera is OFF")
 	except dbus.exceptions.DBusException as e:
+		if as_json:
+			import json
+			print(json.dumps({"active": False, "available": False, "error": str(e)}))
+			return
 		print(f"Error connecting to camfx D-Bus service: {e}")
 		print("Make sure camfx is running with D-Bus support enabled (camfx start --dbus)")
 	except ImportError:
+		if as_json:
+			import json
+			print(json.dumps({"active": False, "available": False, "error": "dbus-python not installed"}))
+			return
 		print("Error: D-Bus Python bindings not available. Install dbus-python or python-dbus.")
 	except Exception as e:
+		if as_json:
+			import json
+			print(json.dumps({"active": False, "available": False, "error": str(e)}))
+			return
 		print(f"Error: {e}")
+
+
+@cli.command('status')
+@click.option('--json', 'as_json', is_flag=True, default=False, help='Output machine-readable JSON (for Omarchy bar widget)')
+@click.option('--waybar-json', is_flag=True, default=False, help='Waybar-compatible JSON (alias for --json, legacy)')
+def status(as_json: bool, waybar_json: bool):
+	"""Aggregated camfx status (camera + effects) — used by Omarchy bar widget.
+
+	When --json is given, prints a single JSON object:
+
+	    {"available": bool, "active": bool, "count": int, "label": str,
+	     "effects": [{"type": str, "class": str, "config": {}}],
+	     "camera": {"source_id": str, "width": int, "height": int, "fps": int}}
+
+	Without --json, prints human-readable lines (like camera-status + get-effects).
+	"""
+	import json
+
+	# Normalize flag alias
+	if waybar_json:
+		as_json = True
+
+	def _human():
+		try:
+			import dbus
+			bus = dbus.SessionBus()
+			service = bus.get_object('org.camfx.Control1', '/org/camfx/Control1')
+			control = dbus.Interface(service, 'org.camfx.Control1')
+			active = bool(control.GetCameraState())
+			print(f"Camera: {'ON' if active else 'OFF'}")
+			effects = control.GetCurrentEffects()
+			if not effects:
+				print("Effects: none")
+			else:
+				print(f"Effects ({len(effects)}):")
+				for i, (etype, klass, cfg) in enumerate(effects):
+					print(f"  {i}: {etype} ({klass}) {dict(cfg)}")
+			try:
+				src, w, h, fps = control.GetCameraConfig()
+				print(f"Camera config: {src} {w}x{h}@{fps}")
+			except Exception:
+				pass
+		except Exception as e:
+			print(f"Error: {e}")
+
+	if not as_json:
+		_human()
+		return
+
+	# JSON path — never raise, always emit something parseable
+	payload: dict = {"available": False, "active": False, "count": 0, "label": "", "effects": [], "camera": {}}
+	try:
+		import dbus
+		bus = dbus.SessionBus()
+		service = bus.get_object('org.camfx.Control1', '/org/camfx/Control1')
+		control = dbus.Interface(service, 'org.camfx.Control1')
+		active = bool(control.GetCameraState())
+		effects = list(control.GetCurrentEffects())
+		payload["available"] = True
+		payload["active"] = active
+		payload["count"] = len(effects)
+		if effects:
+			# label = first effect key or comma-joined when multiple
+			types = [str(e[0]) for e in effects]
+			payload["label"] = types[0] if len(types) == 1 else ",".join(types)
+			payload["effects"] = [
+				{"type": str(etype), "class": str(klass), "config": dict(cfg)}
+				for etype, klass, cfg in effects
+			]
+		try:
+			src, w, h, fps = control.GetCameraConfig()
+			payload["camera"] = {"source_id": str(src), "width": int(w), "height": int(h), "fps": int(fps)}
+		except Exception:
+			pass
+	except Exception as e:
+		payload["error"] = str(e)
+	print(json.dumps(payload))
+
+
+@cli.command('doctor')
+@click.option('--json', 'as_json', is_flag=True, default=False, help='Output machine-readable JSON')
+def doctor(as_json: bool):
+	"""Check camfx prerequisites (ffmpeg, v4l2loopback, D-Bus, models)."""
+	import json
+	import shutil
+	import subprocess
+
+	checks: dict = {}
+
+	# ffmpeg
+	ffmpeg = shutil.which("ffmpeg")
+	checks["ffmpeg"] = {"ok": bool(ffmpeg), "path": ffmpeg or ""}
+
+	# v4l2-ctl / v4l-utils
+	v4l2ctl = shutil.which("v4l2-ctl")
+	checks["v4l2_ctl"] = {"ok": bool(v4l2ctl), "path": v4l2ctl or ""}
+
+	# v4l2loopback module
+	try:
+		out = subprocess.run(["lsmod"], capture_output=True, text=True, timeout=3)
+		loaded = "v4l2loopback" in out.stdout if out.returncode == 0 else False
+		# Also probe card_label discovery state
+		card_devices: list[str] = []
+		if loaded:
+			try:
+				ls = subprocess.run(["v4l2-ctl", "--list-devices"], capture_output=True, text=True, timeout=3)
+				if ls.returncode == 0:
+					# naive extract /dev/video* lines
+					for line in ls.stdout.splitlines():
+						s = line.strip()
+						if s.startswith("/dev/video"):
+							card_devices.append(s)
+			except Exception:
+				pass
+		checks["v4l2loopback"] = {"ok": loaded, "loaded": loaded, "devices": card_devices}
+	except Exception as e:
+		checks["v4l2loopback"] = {"ok": False, "error": str(e)}
+
+	# D-Bus reachable
+	dbus_ok = False
+	dbus_error = ""
+	try:
+		import dbus  # type: ignore
+		bus = dbus.SessionBus()
+		svc = bus.get_object('org.camfx.Control1', '/org/camfx/Control1')
+		dbus_fast = dbus.Interface(svc, 'org.camfx.Control1')
+		_ = dbus_fast.GetCameraState()
+		dbus_ok = True
+	except Exception as e:
+		dbus_error = str(e)
+	checks["dbus"] = {"ok": dbus_ok, "reachable": dbus_ok, "error": dbus_error}
+	if not dbus_ok and not dbus_error:
+		checks["dbus"] = {"ok": False, "error": "dbus-python not installed or service not running"}
+
+	# models
+	try:
+		from .mediapipe_tasks import _default_models_dir  # type: ignore
+		mdir = _default_models_dir()
+		checks["models"] = {"ok": mdir.exists(), "path": str(mdir), "exists": mdir.exists()}
+	except Exception as e:
+		checks["models"] = {"ok": False, "error": str(e)}
+
+	# Overall
+	checks["ok"] = all(v.get("ok") for v in checks.values() if isinstance(v, dict) and "ok" in v)
+
+	if as_json:
+		print(json.dumps(checks))
+		return
+
+	# human
+	for k, v in checks.items():
+		if k == "ok":
+			continue
+		status = "✓" if v.get("ok") else "✗"
+		print(f"{status} {k}: {v}")
+	print(f"\nOverall: {'OK' if checks['ok'] else 'ISSUES FOUND'}")
+	if not checks["ok"]:
+		print("Hint: sudo modprobe v4l2loopback exclusive_caps=1 card_label=\"camfx\" video_nr=-1  (see docs/omarchy-integration-plan.md §7.6)")
 
 
 @cli.command('models-download')

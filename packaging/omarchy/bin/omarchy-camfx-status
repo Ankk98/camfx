@@ -1,0 +1,3 @@
+#!/bin/bash
+# omarchy:summary=camfx status (alias)
+exec python3 -m camfx_omarchy.cli status "$@"

@@ -8,7 +8,8 @@ import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Gdk', '4.0')
 gi.require_version('GLib', '2.0')
-from gi.repository import Gtk, Gdk, GLib
+gi.require_version('Gio', '2.0')
+from gi.repository import Gtk, Gdk, GLib, Gio
 from .dbus_client import CamfxDBusClient
 from .preview_widget import PreviewWidget
 from .effect_chain_widget import EffectChainWidget
@@ -79,6 +80,11 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 		# This avoids stale state when the service disappears and comes back.
 		self._dbus_watchdog_source_id: Optional[int] = None
 		self._start_dbus_watchdog()
+
+		# Omarchy theme live-reload: watch ~/.config/camfx/gtk.css (Q7, Q19 TOML=human, CSS=derived)
+		self._css_provider: Optional[Gtk.CssProvider] = None
+		self._css_monitor: Optional[Gio.FileMonitor] = None
+		self._setup_theme_css()
 	
 	def _build_ui(self):
 		"""Build the user interface."""
@@ -242,6 +248,63 @@ class CamfxMainWindow(Gtk.ApplicationWindow):
 			# Worst case: GUI behaves like before (no restart auto-sync), but should not crash.
 			logger.error("Failed to start D-Bus watchdog: %s", e, exc_info=True)
 			self._dbus_watchdog_source_id = None
+
+	def _setup_theme_css(self) -> None:
+		"""Omarchy live-reload theming (Q7): watch ~/.config/camfx/gtk.css and hot-swap via CssProvider."""
+		try:
+			from pathlib import Path
+			css_path = Path.home() / ".config" / "camfx" / "gtk.css"
+			# Create provider once; it will be added to display when file exists
+			provider = Gtk.CssProvider()
+			self._css_provider = provider
+
+			def _apply_css() -> None:
+				try:
+					if css_path.exists():
+						provider.load_from_path(str(css_path))
+						# Add/re-add to default display; duplicate adds are harmless (GTK4 de-duplicates)
+						display = Gdk.Display.get_default()
+						if display is not None:
+							Gtk.StyleContext.add_provider_for_display(
+								display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+							)
+							logger.info("Applied Omarchy theme CSS from %s", css_path)
+					else:
+						# No file yet — not an error; user hasn't run omarchy theme sync
+						logger.debug("No camfx theme CSS at %s (run omarchy camfx theme-sync)", css_path)
+				except Exception as e:
+					logger.warning("Failed to apply camfx theme CSS: %s", e)
+
+			_apply_css()
+
+			# Watch file and parent dir for live updates (hook touches file on theme-set)
+			try:
+				css_file = Gio.File.new_for_path(str(css_path))
+				# Monitor file itself (requires file to exist; if not, monitor parent)
+				if css_path.exists():
+					mon = css_file.monitor_file(Gio.FileMonitorFlags.NONE, None)
+					mon.connect("changed", lambda *_: _apply_css())
+					self._css_monitor = mon
+				else:
+					parent = Gio.File.new_for_path(str(css_path.parent))
+					mon = parent.monitor_directory(Gio.FileMonitorFlags.NONE, None)
+					def _on_dir_changed(monitor, file, other, event):
+						if file is not None and file.get_path() == str(css_path):
+							if event in (Gio.FileMonitorEvent.CREATED, Gio.FileMonitorEvent.CHANGED, Gio.FileMonitorEvent.CHANGES_DONE_HINT):
+								# Re-create file monitor now that file exists
+								try:
+									nm = css_file.monitor_file(Gio.FileMonitorFlags.NONE, None)
+									nm.connect("changed", lambda *_: _apply_css())
+									self._css_monitor = nm
+								except Exception:
+									pass
+								_apply_css()
+					mon.connect("changed", _on_dir_changed)
+					self._css_monitor = mon
+			except Exception as e:
+				logger.debug("CSS file monitor not available: %s", e)
+		except Exception as e:
+			logger.warning("Theme CSS setup failed: %s", e, exc_info=True)
 
 	def _stop_dbus_watchdog(self) -> None:
 		"""Stop camfx D-Bus watchdog timer."""

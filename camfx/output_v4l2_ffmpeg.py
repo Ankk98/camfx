@@ -15,10 +15,30 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Protocol, runtime_checkable
 import shutil
 
 logger = logging.getLogger("camfx.output_v4l2_ffmpeg")
+
+
+@runtime_checkable
+class OutputBackend(Protocol):
+	"""Abstract virtual-camera output backend (OS-neutral).
+
+	Extracted for Omarchy modularity (docs/omarchy-integration-plan.md §6):
+	V4L2OutputFFmpeg implements this today; PipeWireOutput can be added later
+	without touching core.py callers. At this milestone the abstraction is
+	additive only (no behaviour change).
+	"""
+
+	width: int
+	height: int
+	fps: int
+	device: str
+
+	def send(self, frame_rgb: bytes) -> None: ...
+	def sleep_until_next_frame(self) -> None: ...
+	def cleanup(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)

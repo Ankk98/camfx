@@ -1,0 +1,62 @@
+# Maintainer: camfx contributors
+# PKGBUILD for local Omarchy VM — not the publish lane (Q13 registry is primary per Q1)
+# For registry publish, see docs/omarchy-integration-plan.md §9.2–§9.3 and use `pip install -e .[omarchy]`
+pkgbase=camfx-omarchy
+pkgname=(camfx camfx-omarchy)
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="Camera effects middleware with V4L2 virtual camera — Omarchy-native plugin (video_nr=-1, live-reload theming)"
+arch=(any)
+url="https://github.com/ankk98/camfx"
+license=(MIT)
+makedepends=(python-build python-installer python-setuptools)
+depends=(python python-opencv python-mediapipe python-click python-numpy ffmpeg v4l-utils)
+optdepends=(
+  'gtk4: GUI (camfx gui)'
+  'python-gobject: GTK4 bindings'
+  'python-dbus: D-Bus control (camfx start --dbus)'
+  'v4l2loopback-dkms: virtual camera kernel module (video_nr=-1 auto, card_label=camfx)'
+)
+source=()
+options=(!emptydirs)
+
+build() {
+  cd "$startdir/../.."
+  python -m build --wheel --no-isolation
+}
+
+package_camfx() {
+  pkgdesc="Camera effects middleware — core (OS-neutral, V4L2+FFmpeg)"
+  depends=(python python-opencv python-mediapipe python-click python-numpy ffmpeg v4l-utils)
+  optdepends=(
+    'gtk4: GUI'
+    'python-gobject: GTK bindings'
+    'python-dbus: D-Bus'
+    'v4l2loopback-dkms: v4l2loopback module'
+  )
+  cd "$startdir/../.."
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  install -Dm644 packaging/fedora/camfx.service "$pkgdir/usr/lib/systemd/user/camfx.service"
+  install -Dm644 packaging/fedora/camfx.desktop "$pkgdir/usr/share/applications/camfx.desktop"
+}
+
+package_camfx-omarchy() {
+  pkgdesc="camfx — Omarchy plugin (bar widget camfx.camfx, hooks, Hyprland bindings, theme live-reload)"
+  depends=(camfx omarchy omarchy-settings python)
+  # Reuse the same wheel — camfx_omarchy ships inside it
+  cd "$startdir/../.."
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  # Shell plugin (for /usr/share fallback; user copy goes to ~/.config via `omarchy camfx install`)
+  install -Dm644 packaging/omarchy/omarchy-shell-plugin/camfx.camfx/manifest.json \
+    "$pkgdir/usr/share/omarchy/shell/plugins/camfx.camfx/manifest.json"
+  install -Dm644 packaging/omarchy/omarchy-shell-plugin/camfx.camfx/Camfx.qml \
+    "$pkgdir/usr/share/omarchy/shell/plugins/camfx.camfx/Camfx.qml"
+  install -Dm644 packaging/omarchy/omarchy-shell-plugin/camfx.camfx/CamfxModel.js \
+    "$pkgdir/usr/share/omarchy/shell/plugins/camfx.camfx/CamfxModel.js"
+  # UWSM-wrapped desktop (overrides fedora one with uwsm-app)
+  install -Dm644 packaging/omarchy/camfx.desktop "$pkgdir/usr/share/applications/camfx.desktop"
+  # Systemd variant (graphical-session.target, ExecReload via omarchy-camfx)
+  install -Dm644 packaging/omarchy/camfx.service "$pkgdir/usr/lib/systemd/user/camfx.service"
+  # Bin shims are already in the wheel via scripts=, also ensure OMARCHY_PATH/bins symlink fallback
+  # Hook/bindings templates are inside site-packages/camfx_omarchy — no extra copy needed
+}
